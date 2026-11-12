@@ -1,0 +1,14 @@
+# Personal Claude Code settings
+.claude/settings.local.json
+
+# macOS
+.DS_Store
+
+# Python
+.venv/
+
+# Terraform state and plans never go in git
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
