@@ -1,6 +1,6 @@
 # Spike phase 1 notes: the discovery sandbox
 
-Issue #2. These notes record what a hand-built Lima VM needed so that T3, Claude Code and Codex could finish a toy task inside it. Squid allowed every domain and logged it. nftables made Squid the only way out for the `agent` user and blocked private ranges. Phase 2 (issue #3) builds the allowlist from these results.
+Issue #2. These notes record what a hand-built Lima VM needed so that T3, Claude Code and Codex could finish a toy task inside it. Squid allowed every public domain, refused private addresses, and logged every request. nftables limited the `agent` user to Squid and loopback, and limited Squid to DNS and port 443. The tests below show which of these blocks were checked and which were not. Phase 2 (issue #3) builds the allowlist from these results.
 
 Run on 2026-11-16 and 2026-11-17. Host: macOS 26.6 on Apple silicon, Lima 2.3.0. The VM template is `spike/spike-phase1.yaml`.
 
@@ -12,6 +12,8 @@ Run on 2026-11-16 and 2026-11-17. Host: macOS 26.6 on Apple silicon, Lima 2.3.0.
 - Mask `sshd-vsock.socket`. It listens on vsock port 22 even with `ssh.overVsock: false`.
 - Sanitize everything `git fetch` prints before it reaches the Mac terminal. Escape sequences reach the terminal both from the agent's shell startup files and from git's own `remote:` lines. See [Escape sequences](#escape-sequences-from-git-fetch).
 - Phase 1 tested Squid's private-range blocks, but not nftables' private-range blocks on their own. Phase 2 must test each layer separately. See [Private-range tests](#private-range-tests).
+- Tighten SSH: add `PermitOpen 127.0.0.1:3773` for `agent`, and make `ssh.socket` require nftables, not only start after it. See [The agent user and SSH](#the-agent-user-and-ssh) and [Which unit served the T3 session](#which-unit-served-the-t3-session).
+- Issue #3 says a T3 session has no Anthropic API variables, but Claude Code logs in here through `CLAUDE_CODE_OAUTH_TOKEN`. Issue #3 needs to name that variable as the allowed exception if the login-profile approach stays.
 - Phase 1 did not answer issue #3's go or no-go question: whether the T3 desktop app refuses Mac-side tools when the guest's T3 server is modified. That stays open for phase 2.
 - Allow `systemd-network` to send DHCP to 192.168.5.2, and decide what to do with chrony, fwupd, motd-news and the apt timers. See [Other dropped traffic](#other-dropped-traffic).
 
@@ -21,7 +23,7 @@ The template is hand-written with no `base`. It sets vz, one image pinned by dig
 
 Without `base`, the template does not inherit `param.internal_netplanOptional: "true"` from Lima's `_images/ubuntu-26.04.yaml`. Leaving it out stalls first boot for 120 seconds on a 26.04 network bug. With it, boot took 18 seconds.
 
-An excerpt of the merged config from `limactl list --json`, recorded once before first start. It keeps the keys that matter for the sandbox and leaves out the rest. `mounts` is missing because Lima omits an empty list from the JSON. `~/.lima/_config` held no `default.yaml` or `override.yaml`, so no global config fed into the merge.
+`limactl list --json` was recorded once before first start. The full output is in `spike/phase-1-merged-lima-config.json`, with the Mac's login name, full name, UID, time zone and home path replaced by placeholders. Below is an excerpt with the keys that matter for the sandbox. `mounts` is missing because Lima omits an empty list from the JSON. `~/.lima/_config` held no `default.yaml` or `override.yaml`, so no global config fed into the merge.
 
 ```json
 {
@@ -111,7 +113,9 @@ Match User agent
   PermitTunnel no
 ```
 
-T3 connected with this block in place, so nothing had to be relaxed. T3 reaches its server through a TCP local forward (`-L <mac port>:127.0.0.1:3773`), which `AllowTcpForwarding local` permits. It does not use Unix socket forwarding.
+T3 connected with this block in place, so nothing had to be relaxed. T3 reaches its server through a TCP local forward (`-L <mac port>:127.0.0.1:3773`), which `AllowTcpForwarding local` permits. It does not use Unix socket forwarding. The desktop app's `ssh` process listened on the Mac's 127.0.0.1 and ::1 only.
+
+`AllowTcpForwarding local` allows a `-L` to any destination the guest can reach, not only loopback. Phase 1 did not test this. Issue #3 requires that a `-L` to a non-loopback address fails. That means the destination inside the guest, since the Mac-side listener address is set by the Mac's `ssh` client and sshd cannot control it. Phase 2 should add `PermitOpen 127.0.0.1:3773` to the `Match` block, then check that T3 still connects and that a `-L` to 192.168.5.2 or a public address is refused.
 
 ## Network controls
 
@@ -204,7 +208,18 @@ Codex:
 
 ### Codex system config file
 
-Codex 0.169.0 reads three files under `/etc/codex`: `config.toml`, `managed_config.toml` and `requirements.toml`. The user's `~/.codex/config.toml` overrides `/etc/codex/config.toml`. `managed_config.toml` and `requirements.toml` override both the user file and `-c` flags. Phase 1 found this order by putting conflicting values in each file and in `-c` flags as `agent`, then checking which one took effect. Phase 1 used `managed_config.toml`:
+Codex 0.169.0 reads three files under `/etc/codex`: `config.toml`, `managed_config.toml` and `requirements.toml`. The user's `~/.codex/config.toml` overrides `/etc/codex/config.toml`. `managed_config.toml` and `requirements.toml` override both the user file and `-c` flags.
+
+The test set `[features] apps = false` and `plugins = false` in one `/etc/codex` file at a time. `agent`'s `~/.codex/config.toml` set both to `true`. Root ran `codex features list` as `agent` with an empty environment and read the two values. A second run added `-c features.apps=true`.
+
+| System file with `false` | User file `true` wins? | `-c features.apps=true` wins? |
+|---|---|---|
+| none (baseline) | `apps=true plugins=true` | not run |
+| `config.toml` | yes | yes |
+| `managed_config.toml` | no, both `false` | no, `false` |
+| `requirements.toml` | no, both `false` | no, `false` |
+
+Only feature flags were tested. Whether `check_for_update_on_startup = false` takes effect was not checked separately. Phase 1 used `managed_config.toml`:
 
 ```toml
 check_for_update_on_startup = false
@@ -257,7 +272,7 @@ vsock::22                   sshd-vsock.socket       -
 
 The sshd journal shows every T3 login as `Accepted publickey for agent from 192.168.5.2`, which is the TCP path through `ssh.socket`. `ssh.service` itself is disabled and starts only on socket activation.
 
-`sshd-vsock.socket` exists and listens on vsock port 22 even with `ssh.overVsock: false`. systemd-ssh-generator creates it whenever the guest has a vsock device. Phase 2 must mask it. That still leaves `sshd-unix-local.socket`, a Unix socket at `/run/ssh-unix-local/socket` that the same generator creates. Its permissions and who can use it were not checked. Phase 2 should list the remaining SSH sockets after masking and decide about this one. If SSH must never listen before the firewall loads, phase 2 should order `ssh.socket` after `nftables.service` as well.
+`sshd-vsock.socket` exists and listens on vsock port 22 even with `ssh.overVsock: false`. systemd-ssh-generator creates it whenever the guest has a vsock device. Phase 2 must mask it. That still leaves `sshd-unix-local.socket`, a Unix socket at `/run/ssh-unix-local/socket` that the same generator creates. Its permissions and who can use it were not checked. Phase 2 should list the remaining SSH sockets after masking and decide about this one. If SSH must never listen without the firewall, ordering is not enough. `After=nftables.service` alone still lets `ssh.socket` start when nftables fails. Phase 2 should give `ssh.socket` both `Requires=nftables.service` and `After=nftables.service`, then test a boot where `/etc/nftables.conf` fails to load and check that port 22 stays closed. It should also decide what happens if nftables stops on a running VM, since `ExecStop` flushes the rules.
 
 ## vsock
 
@@ -271,7 +286,7 @@ What was not tested:
 - Whether `agent` can connect to the guest agent's own vsock port 2222. The CID 1 and CID 3 attempts failed with a reset and `ENODEV`, so they do not answer it.
 - Which of the Mac's `.sock` files map to which vsock port. The file names suggest their roles, but phase 1 did not trace them.
 
-`agent` can open vsock sockets but found no listener on the host. nftables does not filter `AF_VSOCK`, so it cannot close this path. If phase 2 wants vsock closed to `agent`, the options are seccomp or another LSM rule for that user, or tightening `/dev/vsock` permissions after checking what else needs it.
+`agent` can open vsock sockets but found no listener on the host. nftables does not filter `AF_VSOCK`, so it cannot close this path. `/dev/vsock` permissions do not close it either, because programs create vsock sockets with `socket(AF_VSOCK, ...)`, not by opening the device. If phase 2 wants vsock closed to `agent`, it needs a rule that blocks the `AF_VSOCK` socket family for every process `agent` starts, such as `RestrictAddressFamilies=` on the units that run as `agent` or a seccomp filter for the SSH session. It should then check as `agent` that creating a vsock socket fails.
 
 ## Linger
 

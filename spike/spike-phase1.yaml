@@ -33,7 +33,9 @@ ssh:
   # Don't forward the Mac's SSH agent into the guest. (line 170)
   forwardAgent: false
   # The vz default carries SSH over vsock, served by systemd-ssh-generator's
-  # units instead of Ubuntu's ssh.socket. Plain TCP keeps one SSH path. (line 179)
+  # units instead of Ubuntu's ssh.socket. With false, Lima uses TCP for SSH.
+  # The guest still listens on vsock port 22 until sshd-vsock.socket is
+  # masked. (line 179)
   overVsock: false
 
 # The builtin default turns on user (rootless) containerd. (lines 207-215)
