@@ -1,7 +1,9 @@
 # Wardian spike phase 1 (issue #2): the discovery sandbox.
 #
-# Hand-written with no `base`, so every setting Lima uses is in this file
-# or is a builtin default listed in Lima 2.3.0's templates/default.yaml.
+# Hand-written with no `base`, so every setting Lima uses is in this file,
+# a builtin default listed in Lima 2.3.0's templates/default.yaml, or
+# ~/.lima/_config/{default,override}.yaml on the Mac. Those two files did
+# not exist during the spike.
 # Line references below point at /opt/homebrew/share/lima/templates/default.yaml.
 
 # Apple's Virtualization.framework. Required for networkOpts.hostLoopback. (line 12)

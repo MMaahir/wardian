@@ -6,11 +6,13 @@ Run on 2026-11-16 and 2026-11-17. Host: macOS 26.6 on Apple silicon, Lima 2.3.0.
 
 ## Summary for phase 2
 
-- Allow these domains for the agents: `api.anthropic.com` (Claude), `chatgpt.com` and `auth.openai.com` (Codex). The rest of the Squid log is optional traffic or T3's installer. See [Domains](#every-domain-in-the-squid-log).
+- Start with this allowlist: `api.anthropic.com` (Claude), `chatgpt.com` and `auth.openai.com` (Codex). Phase 1 allowed everything, so it shows which hosts appeared, not which ones the agents can work without. Phase 2 must rerun both agents with the allowlist enforced, including a Codex token refresh, before treating it as enough. See [Domains](#every-domain-in-the-squid-log).
 - Install T3's server while provisioning the VM. Otherwise T3 downloads it from GitHub on first connect, and GitHub would have to be on the allowlist.
 - Install Codex from the full `codex-package` tarball, not the single `codex` binary. Codex in T3 fails without `codex-code-mode-host`.
 - Mask `sshd-vsock.socket`. It listens on vsock port 22 even with `ssh.overVsock: false`.
-- Filter or avoid the agent's shell when fetching code out of the VM. Bytes that the agent's `~/.bashrc` writes to stderr reach the Mac terminal unchanged.
+- Sanitize everything `git fetch` prints before it reaches the Mac terminal. Escape sequences reach the terminal both from the agent's shell startup files and from git's own `remote:` lines. See [Escape sequences](#escape-sequences-from-git-fetch).
+- Phase 1 tested Squid's private-range blocks, but not nftables' private-range blocks on their own. Phase 2 must test each layer separately. See [Private-range tests](#private-range-tests).
+- Phase 1 did not answer issue #3's go or no-go question: whether the T3 desktop app refuses Mac-side tools when the guest's T3 server is modified. That stays open for phase 2.
 - Allow `systemd-network` to send DHCP to 192.168.5.2, and decide what to do with chrony, fwupd, motd-news and the apt timers. See [Other dropped traffic](#other-dropped-traffic).
 
 ## Template and merged config
@@ -19,7 +21,7 @@ The template is hand-written with no `base`. It sets vz, one image pinned by dig
 
 Without `base`, the template does not inherit `param.internal_netplanOptional: "true"` from Lima's `_images/ubuntu-26.04.yaml`. Leaving it out stalls first boot for 120 seconds on a 26.04 network bug. With it, boot took 18 seconds.
 
-The merged config from `limactl list --json`, recorded once before first start, showing the keys that matter:
+An excerpt of the merged config from `limactl list --json`, recorded once before first start. It keeps the keys that matter for the sandbox and leaves out the rest. `mounts` is missing because Lima omits an empty list from the JSON. `~/.lima/_config` held no `default.yaml` or `override.yaml`, so no global config fed into the merge.
 
 ```json
 {
@@ -138,7 +140,7 @@ nameserver 192.168.5.2
 - `ExecStart` and `ExecReload` load `/etc/nftables.conf`. `ExecStop` runs `nft flush ruleset`.
 - The unit is disabled by default. The spike enabled it.
 
-The rules load before the network comes up. `ExecStop` flushes every table, Lima's LIMADNS included, so stopping the service on a running VM leaves no firewall. Phase 2 should not stop or restart it on a live VM.
+systemd orders the unit before `network-pre.target`, so the rules should load before networkd configures interfaces. Phase 1 read the unit file and did not trace a cold boot, so phase 2 should check that no packet leaves before the rules load. `ExecStop` flushes every table, Lima's LIMADNS included, so stopping the service on a running VM leaves no firewall. Phase 2 should not stop or restart it on a live VM.
 
 ### Squid
 
@@ -149,13 +151,17 @@ logformat wardian_json {"time":"%{%Y-%m-%dT%H:%M:%S%z}tl","client":"%>a","method
 access_log syslog:daemon.info wardian_json
 ```
 
-A drop-in sets `LogRateLimitIntervalSec=0` on `squid.service` so journald keeps every line.
+A sample line in the journal carried `_SYSTEMD_UNIT=squid.service`, `SYSLOG_IDENTIFIER=squid`, `_TRANSPORT=syslog` and `_UID=13` (proxy). The `_`-prefixed fields come from journald, not from Squid, so filtering on them is safe.
+
+A drop-in sets `LogRateLimitIntervalSec=0` on `squid.service`, which turns off journald's per-service rate limit for Squid. Other limits, such as the syslog socket buffer, were not tested.
+
+The format applies no quoting modifier to request values such as `%>ru` and `%>rd`. Phase 1 did not check whether Squid escapes a `"` in a URL. If it doesn't, a crafted request could break the JSON line or add fake fields. Phase 2 should test this before a parser trusts the log.
 
 `::ffff:0:0/96` must stay out of Squid's `dst` ACL. Squid stores IPv4 addresses internally as IPv4-mapped IPv6, so that range matches every IPv4 address. Squid warns that the other ranges are "covered by 0.0.0.0/0". It belongs in the nftables set, where it means only mapped addresses.
 
 ### Private-range tests
 
-From the Mac, through an `ssh -L 13128:127.0.0.1:3128` tunnel as `agent`, every one of these returned 403 `ERR_ACCESS_DENIED` for both a plain GET and a CONNECT to port 443:
+From the Mac, through an `ssh -L 13128:127.0.0.1:3128` tunnel as `agent`, Squid denied a plain GET and a CONNECT to port 443 for every one of these with HTTP 403 `ERR_ACCESS_DENIED`:
 
 - 192.168.5.2, `host.lima.internal`, `localhost`, 127.0.0.1, [::1]
 - the Mac's LAN address and the LAN gateway
@@ -166,7 +172,15 @@ The Mac had no global IPv6 address or IPv6 default route, so those were the only
 
 Decimal and hex forms of 192.168.5.2 and 127.0.0.1 did not test Squid. curl rewrote them to dotted form before sending, so Squid never saw the encoded forms. Phase 2 should send raw requests if it wants that test.
 
-Inside the guest, as `agent`: direct HTTPS fails because there is no DNS. HTTPS through Squid works. HTTP on port 80 through Squid times out, because nftables lets `proxy` out on 443 only. `getent`, `dig` and `resolvectl` fail. 192.168.5.2:22 times out. Host loopback is closed: a guest request to a Mac loopback service on 192.168.5.2:8765 failed.
+Inside the guest, as `agent`: direct HTTPS fails because there is no DNS. HTTPS through Squid works. HTTP on port 80 through Squid times out, because nftables lets `proxy` out on 443 only. `getent`, `dig` and `resolvectl` fail. 192.168.5.2:22 times out, and nftables logged the drop with `agent`'s UID.
+
+What these tests do not show:
+
+- Squid's ACL denied every private target first, so no test reached nftables' `proxy` rules for private ranges. Those rules are untested.
+- No test sent `agent` straight to a public IP address with no name lookup. The nftables policy should drop it, but phase 1 did not try.
+- A guest request to a Mac loopback service on 192.168.5.2:8765 failed. The test did not record which user sent it or include a positive control, so it does not show whether Lima's `hostLoopback: false` or the guest firewall stopped it.
+
+Phase 2 should test each layer on its own, with a positive control and the nftables counters. Linux sends a connection to an IPv4-mapped address (`::ffff:a.b.c.d`) as IPv4, so the IPv4 private set is the rule that has to catch it. Issue #3 already requires a `dstdomain -n` deny before any ACL that resolves names.
 
 ## CLIs
 
@@ -190,7 +204,7 @@ Codex:
 
 ### Codex system config file
 
-Codex 0.169.0 reads three files under `/etc/codex`: `config.toml`, `managed_config.toml` and `requirements.toml`. The user's `~/.codex/config.toml` overrides `/etc/codex/config.toml`. `managed_config.toml` and `requirements.toml` override both the user file and `-c` flags. Phase 1 used `managed_config.toml`:
+Codex 0.169.0 reads three files under `/etc/codex`: `config.toml`, `managed_config.toml` and `requirements.toml`. The user's `~/.codex/config.toml` overrides `/etc/codex/config.toml`. `managed_config.toml` and `requirements.toml` override both the user file and `-c` flags. Phase 1 found this order by putting conflicting values in each file and in `-c` flags as `agent`, then checking which one took effect. Phase 1 used `managed_config.toml`:
 
 ```toml
 check_for_update_on_startup = false
@@ -209,6 +223,8 @@ security find-generic-password -s wardian-claude-token -w | tr -d '\n' \
 ```
 
 `/etc/profile.d/wardian-claude-token.sh` exports `CLAUDE_CODE_OAUTH_TOKEN` from that file for users who can read it.
+
+Issue #3 requires that a T3 session has no Anthropic or OpenAI API variables. `CLAUDE_CODE_OAUTH_TOKEN` is how Claude Code logs in here, so it is expected in the session. Phase 2 should state that this one variable is the allowed exception, and check that `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and the cloud variables are absent.
 
 The first Keychain entry held a 10-character value that was not a token. Phase 2 should check the `sk-ant-oat` prefix and the length before sending it, without printing the value.
 
@@ -241,7 +257,7 @@ vsock::22                   sshd-vsock.socket       -
 
 The sshd journal shows every T3 login as `Accepted publickey for agent from 192.168.5.2`, which is the TCP path through `ssh.socket`. `ssh.service` itself is disabled and starts only on socket activation.
 
-`sshd-vsock.socket` exists and listens on vsock port 22 even with `ssh.overVsock: false`. systemd-ssh-generator creates it whenever the guest has a vsock device. Phase 2 must mask it so SSH has one path. `sshd-unix-local.socket` is a local Unix socket in `/run`.
+`sshd-vsock.socket` exists and listens on vsock port 22 even with `ssh.overVsock: false`. systemd-ssh-generator creates it whenever the guest has a vsock device. Phase 2 must mask it. That still leaves `sshd-unix-local.socket`, a Unix socket at `/run/ssh-unix-local/socket` that the same generator creates. Its permissions and who can use it were not checked. Phase 2 should list the remaining SSH sockets after masking and decide about this one. If SSH must never listen before the firewall loads, phase 2 should order `ssh.socket` after `nftables.service` as well.
 
 ## vsock
 
@@ -250,11 +266,16 @@ The sshd journal shows every T3 login as `Accepted publickey for agent from 192.
 - `/dev/vsock` is mode 0666.
 - As `agent`, connecting to CID 2 (the host) on ports 1 to 65535 found no listener. CID 3 gave `ENODEV`. CID 1 reset the connection.
 
-`agent` can open vsock sockets but found nothing on the host to talk to. Phase 2 could add an nftables or seccomp rule if it wants vsock closed to `agent` outright.
+What was not tested:
+
+- Whether `agent` can connect to the guest agent's own vsock port 2222. The CID 1 and CID 3 attempts failed with a reset and `ENODEV`, so they do not answer it.
+- Which of the Mac's `.sock` files map to which vsock port. The file names suggest their roles, but phase 1 did not trace them.
+
+`agent` can open vsock sockets but found no listener on the host. nftables does not filter `AF_VSOCK`, so it cannot close this path. If phase 2 wants vsock closed to `agent`, the options are seccomp or another LSM rule for that user, or tightening `/dev/vsock` permissions after checking what else needs it.
 
 ## Linger
 
-`pkaction --action-id org.freedesktop.login1.set-self-linger` shows the action allowed for any local user. As `agent`, `loginctl enable-linger` succeeded with no prompt. The spike reversed it with `loginctl disable-linger agent`. With linger on, `agent` processes could outlive its sessions and start at boot. Phase 2 should block it with a polkit rule.
+`pkaction --action-id org.freedesktop.login1.set-self-linger` shows the action allowed for any local user. As `agent`, `loginctl enable-linger` succeeded with no prompt. The spike reversed it with `loginctl disable-linger agent`. With linger on, `agent` processes could outlive its sessions and start at boot. Phase 2 should block it with a polkit rule, then check three things: `agent` gets a denial, root can still set linger, and `/var/lib/systemd/linger/agent` does not exist.
 
 ## Time sync
 
@@ -279,13 +300,13 @@ Totals from the whole phase 1 run:
 | `systemd-network` (998) | ff02::2 ICMPv6 | 26 | IPv6 router solicitation. |
 | `proxy` (13) | 172.66.147.243 TCP 80 | 11 | Test HTTP request to example.com. Expected. |
 
-The DHCP lease from 192.168.5.2 lasts one hour, with renewal at 30 minutes. Unicast renewals were dropped. systemd-networkd still kept the address, because the broadcast rebind at 52 minutes goes out on a raw packet socket that nftables' output hook does not see. Phase 2 should allow `systemd-network` to 192.168.5.2 on UDP 67 rather than rely on that.
+The DHCP lease from 192.168.5.2 lasts one hour, with renewal at 30 minutes. nftables dropped the unicast renewals. The guest still kept its lease, and networkd logged the address as acquired again. A likely reason is that the broadcast rebind at 52 minutes goes out on a raw packet socket, which nftables' output hook does not see. That is an inference. Phase 1 has no packet capture or lease trace to confirm it. Phase 2 should allow `systemd-network` to 192.168.5.2 on UDP 67, then check that a renewal succeeds after 30 minutes.
 
 Root traffic is allowed and never goes through Squid, so none of it is logged. These timers run as root and reach the internet on their own: `apt-daily`, `apt-daily-upgrade`, `motd-news`, `update-notifier-download`, `update-notifier-motd`. Phase 2 should disable them and narrow the `root` rule.
 
 ## Every domain in the Squid log
 
-The full phase 1 log, grouped. All are CONNECT to port 443 with status 200 unless noted.
+Every host name in the phase 1 log, grouped. Each count includes every request to that name. All are CONNECT to port 443 with status 200 unless noted. Requests that Squid denied with 403 are listed after the table.
 
 | Domain | Requests | Who | Needed? |
 |---|---|---|---|
@@ -298,7 +319,7 @@ The full phase 1 log, grouped. All are CONNECT to port 443 with status 200 unles
 | `github.com`, `release-assets.githubusercontent.com` | 2, 2 | T3 launcher | No, if T3 is installed while provisioning. |
 | `example.com` | 2 CONNECT, 2 GET on port 80 | Spike tests | No. The port 80 GETs got no response, because nftables blocked Squid on port 80. |
 
-The 403 lines in the log are the private-range tests listed above.
+Squid denied the private-range tests listed above with 403, one GET and one CONNECT per target, or two to three each for 127.0.0.1, 169.254.169.254 and 192.168.5.2. Those requests were for `localhost`, `host.lima.internal`, IP literals, and nothing else.
 
 ## Toy task
 
@@ -330,13 +351,16 @@ printf "remote-test \033[31mRED\033[0m \033]0;TITLE-SET-BY-VM\007\n" >&2
 
 `git fetch` from the Mac then printed the color code and the OSC window-title code unchanged (`cat -v` shows `^[[31m` and `^[]0;TITLE-SET-BY-VM^G`). The `.bashrc` was restored afterwards.
 
-These bytes never pass through git's `remote:` sideband, where git could filter them. sshd starts `agent`'s login shell to run `git-upload-pack`, the shell reads `~/.bashrc`, and anything it writes to stderr goes straight to the Mac's terminal. `agent` owns that file. The Mac's git version (Apple Git 2.50.1) makes no difference on this path. Escapes in the sideband itself were not tested, because this path already passes them through.
+These bytes don't go through git at all. sshd runs `git-upload-pack` through `agent`'s shell with `-c`. bash reads `~/.bashrc` when sshd starts it, even though it isn't a login shell. `agent` owns that file, and anything it writes to stderr goes straight to the Mac's terminal.
 
-Phase 2 options:
+git's own `remote:` lines also pass escape sequences. This test ran on the Mac with a throwaway local repo, since the VM was already gone. A `uploadpack.packObjectsHook` script printed the same escape codes to stderr, and Apple Git 2.50.1 showed them after `remote:` unchanged:
 
-- Pipe fetch output through a filter such as `cat -v`, or send it to a file.
-- Fetch through a path that does not start `agent`'s shell, for example root writing a `git bundle` and copying it out.
+```
+remote: sideband-test ^[[31mRED^[[0m ^[]0;TITLE-SET-BY-REMOTE^G
+```
+
+So there are two paths, and sanitizing the output is the fix that covers both. Phase 2 should send stdout and stderr from every fetch through a filter that strips control characters before they reach a terminal, and keep git's exit status. A route that skips `agent`'s shell would close only the first path. Running git as root against the agent-owned repo is not an option either, because the repo's config is agent-controlled and could make root run agent code.
 
 ## Destroyed
 
-The phase 1 VM was deleted with `limactl delete --force wardian-spike`. The T3 environment entry for it remains in the desktop app and can be removed by hand.
+`limactl delete --force wardian-spike` removed the phase 1 VM. The T3 environment entry for it remains in the desktop app and can be removed by hand.
