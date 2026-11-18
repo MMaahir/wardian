@@ -498,6 +498,10 @@ Later tickets for the automated build:
 - **Root and `_apt` egress.** Drop their DNS and public HTTP(S) traffic once provisioning is done, and close provisioning connections before `agent` gets the VM, since established traffic is accepted before the UID checks. Keep SSH replies, DHCP and Squid's resolver access. Rebuild the VM to install packages instead of opening egress again. Root can rewrite nftables itself, so this limits root daemons and doesn't contain a root compromise.
 - **Safe token install.** Validate a temporary copy before moving it into place, and test writability without writing. See [User steps](#user-steps).
 
+## Destroyed
+
+The VM was deleted on 2026-11-18 with `limactl delete --force wardian-spike`, which removed the Claude token file and Codex's login with it. The Keychain item `wardian-claude-token` on the Mac is unchanged.
+
 ## Guest files
 
 Every file root wrote or changed, as they stand on the VM. The one-off test helpers (`/usr/local/bin/wardian-tcpprobe`, a Python connect probe, and the boot-test unit) were deleted after use and are not listed.
