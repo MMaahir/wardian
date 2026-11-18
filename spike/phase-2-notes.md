@@ -4,18 +4,20 @@ Issue #3. These notes record a fresh Lima VM built with the allowlist from phase
 
 Run on 2026-11-17 and 2026-11-18. Host: macOS 26.6 on Apple silicon, Lima 2.3.0. The VM template is `spike/spike-phase2.yaml`. The Mac's LAN address and LAN gateway appear below as `<mac-lan-ip>` and `<lan-gateway>`.
 
-The ticket is not finished. Every check that needs the Claude token, a Codex login or the T3 desktop app is still waiting on a user step. See [Pending user steps](#pending-user-steps).
+Every check has run except the tamper test and starting a Codex Cloud task. Two criteria fail: `html_render` acts on the Mac, and `codex cloud` reaches the account. The first is an accepted risk. The second needs a decision. See [Questions](#questions-for-the-issue).
 
-## Summary so far
+## Summary
 
-- Every network, SSH, file permission and linger control that can be tested without the agents passed. Squid's and nftables' private-range blocks each stop the Mac on their own.
+- Both agents finished the toy task in full-access mode through Squid, with no approvals and no extra hosts. Every control rechecked afterwards still held; see the full-access row below for which ones. Cron was open to `agent` until the review found it, and `/etc/cron.allow` now limits it to root. Squid's and nftables' private-range blocks each stop the Mac on their own.
 - A broken `/etc/nftables.conf` keeps port 22 closed at boot, because `ssh.socket` requires `nftables.service`. It also leaves the guest with no firewall at all until someone fixes it.
-- The initramfs gets a DHCP lease from 192.168.5.2 about one second before the rules load. Nothing else leaves early.
+- The initramfs gets a DHCP lease from 192.168.5.2 about one second before the rules load. The journal shows no other traffic in that second, but no packet capture covered it, so other early packets are not ruled out.
 - `sshd-unix-local.socket` was open to every local user (`0666`). It is now masked along with `sshd-vsock.socket`.
 - Squid escapes `"` and `\` in the JSON log, but passes bytes above 0x7f raw, so a log line can be invalid UTF-8.
 - `agent`'s subuid range moved to `165536` once Lima's admin account became UID 1000. Phase 1's hard-coded `usermod` range removed nothing.
 - Two more root timers reach the network: `ua-timer` and `apport-autoreport`. Both are masked now.
-- `codex cloud` probably uses `chatgpt.com`, which the allowlist must keep for the model API. If so, that criterion will fail.
+- T3's `html_render` tool lets an agent in the VM make the Mac send network requests, bypassing Squid. That fails the "none acts on the Mac" criterion. It is recorded as an accepted risk. See [html_render reaches the Mac's network](#html_render-reaches-the-macs-network).
+- `CLAUDE_CODE_OAUTH_TOKEN` is visible to Codex too, since both agents run as `agent`.
+- `codex cloud list` works as `agent` through `chatgpt.com`, which the allowlist must keep for the model API. That criterion fails.
 
 ## Acceptance criteria
 
@@ -23,20 +25,20 @@ The ticket is not finished. Every check that needs the Claude token, a Codex log
 |---|---|---|
 | A fresh VM from the phase 1 template is used | Pass | `limactl create` from `spike/spike-phase2.yaml`, which is the phase 1 template plus a fixed admin user and time zone. Same image digest. No instance existed before. |
 | Squid listens on loopback only, CONNECT to 443 only, denies non-allowlisted names before any lookup, denies the cache manager, ends with deny-all | Pass | `ss` shows only `127.0.0.1:3128`. GET and CONNECT to ports 80, 22 and 8443 get 403. A packet capture showed no DNS query for two non-allowlisted names, and one for the allowlisted control. The cache manager gets 403. See [Squid](#squid). |
-| The allowlist holds only the agents' API and login hosts plus read-only hosts the toy task needs | Pass for the config; pending for sufficiency | The allowlist is `api.anthropic.com`, `chatgpt.com`, `auth.openai.com`. The toy task needs no other host. Whether both agents work with only these is pending the toy task runs. |
+| The allowlist holds only the agents' API and login hosts plus read-only hosts the toy task needs | Pass | The allowlist is `api.anthropic.com`, `chatgpt.com`, `auth.openai.com`. Both agents finished the toy task with only these. Squid denied `sdmntpr*.oaiusercontent.com` and `ab.chatgpt.com` for Codex, and Codex worked without them. See [Toy task](#toy-task). |
 | As `agent`, a non-allowlisted domain fails, and so do `dig`, `getent hosts` and `resolvectl query` | Pass | Nine non-allowlisted names got `CONNECT tunnel failed, response 403`. `dig` reached no server, `getent hosts` exited 2, `resolvectl query` failed. |
 | As `agent`, the Mac (192.168.5.2 and its LAN address) can't be reached, directly or through Squid | Pass | Direct attempts timed out and raised the `agent_dropped` counter. Through Squid, every IP literal and Mac name got 403. Squid's and nftables' private-range blocks were each tested on their own with a positive control. See [Private-range tests](#private-range-tests). |
 | `sudo` fails for `agent` | Pass | `sudo -n true` exits 1. `sudo -l` says `user agent may not run sudo`. |
-| As `agent`, `-R` and agent forwarding are refused, a `-L` to a non-loopback address fails, T3's loopback forward still works | Pass with a test listener; T3 itself pending | `-R` fails with `remote port forwarding failed`. With `ForwardAgent=yes`, `SSH_AUTH_SOCK` is empty. `-L`, `-D` and `-W` to anything but `127.0.0.1:3773` get `administratively prohibited`. `-L` to `127.0.0.1:3773` reached a test listener. T3's own connect is pending. |
-| `agent` can't write the CLI binaries or their config, or the token and login-profile files. No update host is on the allowlist | Pass | Every append and create attempt got `Permission denied`. `find -writable` as `agent` found nothing under the CLI and config paths. No update host is on the allowlist. The token file does not exist yet. See [Files agent can't write](#files-agent-cant-write). |
-| Inside a T3 session, no AWS, Google, Cloud SDK, Anthropic or OpenAI API variables | Pending user step | An SSH login shell as `agent` has none of them. The T3 session check needs the desktop app. See [Questions](#questions-for-the-issue) about `CLAUDE_CODE_OAUTH_TOKEN`. |
-| Claude and Codex each finish the toy task through Squid; the notes record Codex's transport | Pending user step | Needs the token and a Codex login. |
-| In a T3 session, every tool each agent can call is listed, and none acts on the Mac | Pending user step | Needs the desktop app. |
-| Modifying or replacing the T3 server, then asking for a Mac-side tool, is refused by the desktop app | Pending user step | Needs the desktop app. `agent` can rename the root-owned server directory, so the tamper test is possible. |
-| No account connector is active for either agent | Pending user step | Managed config turns off Claude's claude.ai connectors and Codex's `apps` feature. `codex features list` shows `apps false`. A live check needs logged-in agents. |
-| `codex cloud` can't see or start tasks on your repos | Pending user step | Needs a Codex login. |
-| All of the above hold with both agents in full-access mode | Pending user step | Needs the agent runs. |
-| The spike notes and template are committed | Pass | This file and `spike/spike-phase2.yaml` on branch `spike/phase-2`. |
+| As `agent`, `-R` and agent forwarding are refused, a `-L` to a non-loopback address fails, T3's loopback forward still works | Pass | `-R` fails with `remote port forwarding failed`. With `ForwardAgent=yes`, `SSH_AUTH_SOCK` is empty. `-L`, `-D` and `-W` to anything but `127.0.0.1:3773` get `administratively prohibited`. `-L` to `127.0.0.1:3773` reached a test listener, and T3 connected through it. |
+| `agent` can't write the CLI binaries or their config, or the token and login-profile files. No update host is on the allowlist | Pass | Every append and create attempt got `Permission denied`. `find -writable` as `agent` found nothing under the CLI and config paths. No update host is on the allowlist. The token file is `root:agent 0640`, and an append as `agent` got `Permission denied`. See [Files agent can't write](#files-agent-cant-write). |
+| Inside a T3 session, no AWS, Google, Cloud SDK, Anthropic or OpenAI API variables | Pass, with one exception | Both agents' tool shells have none of them except `CLAUDE_CODE_OAUTH_TOKEN`, which both see. See [Environment variables](#environment-variables) and [Questions](#questions-for-the-issue). |
+| Claude and Codex each finish the toy task through Squid; the notes record Codex's transport | Pass | Both committed a passing `words.py` on their own branch. Codex used the Responses WebSocket (`101`) inside a CONNECT tunnel to `chatgpt.com:443`. See [Toy task](#toy-task). |
+| In a T3 session, every tool each agent can call is listed, and none acts on the Mac | Fail, accepted risk | Every tool is listed in [Tools each agent can call](#tools-each-agent-can-call). `html_render` pages run on the Mac and can send network requests from it. See [html_render reaches the Mac's network](#html_render-reaches-the-macs-network). |
+| Modifying or replacing the T3 server, then asking for a Mac-side tool, is refused by the desktop app | Not run | `agent` can rename the root-owned server directory and owns the server's signing keys, so tampering is possible. The `html_render` result makes this test unnecessary to decide the criterion above, because the hole needs no tampering. The device gate is in the VM server, so tampering would likely remove it, but the devices it reaches are in the VM. |
+| No account connector is active for either agent | Pass | Logged in, as `agent`: `claude mcp list` prints `No MCP servers configured`, `codex mcp list` prints `No MCP servers configured yet`, and `codex features list` shows `apps false`. In the T3 sessions each agent listed every tool it could call, and the only MCP tools were T3's own: no `claude.ai` connector tools for Claude, and no app or plugin tools for Codex (see [Tools each agent can call](#tools-each-agent-can-call)). Claude's `/mcp` command was not run. Codex's `plugins` feature is still `true`. |
+| `codex cloud` can't see or start tasks on your repos | Fail | As `agent`, `codex cloud list` exited 0 with `No tasks found.` Squid logged only `chatgpt.com` with status 200 for it, so the logged-in CLI reaches the Codex Cloud API through the allowlist. Why the list was empty, whether any repo environments are visible, and whether `codex cloud exec --env <id>` could start a task were not checked. See [Questions](#questions-for-the-issue). |
+| All of the above hold with both agents in full-access mode | Partly | The `html_render`, `codex cloud` and token-variable results above stand, and the tamper test was not run. Both toy runs were in full-access mode and used only allowlisted hosts. These checks were repeated afterwards: as `agent`, `sudo -n true` still exits 1, `crontab` is refused, linger is `no`, the token file is unchanged, both SSH sockets are masked, and `/etc/nftables.conf` still loads. During that boot nftables dropped only `agent`'s DNS queries to 192.168.5.2, and root opened no connections. The other network, SSH and file checks ran before the agents and were not repeated. See [Toy task](#toy-task). |
+| The spike notes and template are committed | Pass with the commit that adds these results | This file and `spike/spike-phase2.yaml` on branch `spike/phase-2`. |
 
 Other checks the phase 1 notes asked for:
 
@@ -76,6 +78,7 @@ Root provisioned everything through `limactl shell wardian-spike sudo bash -s` w
 8. Wrote the managed configs for both CLIs, the proxy block in `/etc/environment`, `/etc/profile.d/wardian-claude-token.sh`, and the polkit linger rule. Created `/etc/wardian` as `root:agent 0750`, empty.
 9. Wrote `/etc/nftables.conf`, added a drop-in that empties `ExecStop`, and enabled and started `nftables.service`.
 10. As `agent`, created `~/toy` with `receive.denyCurrentBranch updateInstead` and a git identity. The Mac pushed the toy project's `main` (`c8fb1a6`) into it. Both tests fail there as expected until `top_words` is written.
+11. After the first review, wrote `/etc/cron.allow` holding only `root`, so `agent` can't use `crontab`. See [Cron](#cron).
 
 The Mac's known-hosts file `~/.ssh/known_hosts.d/wardian-spike` held the destroyed VM's key. It now holds the new VM's ed25519 key, read with `limactl shell wardian-spike cat /etc/ssh/ssh_host_ed25519_key.pub`. The fingerprint is `SHA256:HkiOH+OXpn7R8UUlRc/e9NK8V4IPTqnUPTEv/FRfuEc`, and `ssh wardian-spike` connects with `StrictHostKeyChecking yes`.
 
@@ -158,7 +161,7 @@ Packets that systemd-network sends to `ff02::2` (IPv6 router solicitation) are s
 
 Each layer was tested on its own, with a positive control and the counters. The Mac had AirPlay listening on `*:5000` and `*:7000`, which gave a real service to aim at.
 
-**Positive control: the Mac is reachable when nothing blocks it.** A temporary rule at the top of the output chain let `lima` (UID 1000) reach 192.168.5.2 and `<mac-lan-ip>` on TCP 22, 5000 and 7000. As `lima`, `<mac-lan-ip>:7000` and `<mac-lan-ip>:5000` connected. 192.168.5.2 refused ports 7000, 5000 and 22 with `Connection refused`, even though AirPlay listens on all the Mac's addresses. That shows `hostLoopback: false` blocks the Mac's loopback services at Lima, before the guest firewall plays any part. The temporary rule was deleted by its handle, and a listing afterwards showed no copy left.
+**Positive control: the Mac is reachable when nothing blocks it.** A temporary rule at the top of the output chain let `lima` (UID 1000) reach 192.168.5.2 and `<mac-lan-ip>` on TCP 22, 5000 and 7000. As `lima`, `<mac-lan-ip>:7000` and `<mac-lan-ip>:5000` connected. 192.168.5.2 refused ports 7000, 5000 and 22 with `Connection refused`, even though AirPlay listens on all the Mac's addresses. The temporary rule let these packets past the guest firewall, so the refusal came from outside the guest. That fits `hostLoopback: false`, but the test was not rerun with `hostLoopback: true`, so it doesn't prove that setting is the cause. The temporary rule was deleted by its handle, and a listing afterwards showed no copy left.
 
 **nftables alone, agent.** As `agent` with no proxy, connections to `<mac-lan-ip>:7000`, `<mac-lan-ip>:5000`, `192.168.5.2:7000`, `192.168.5.2:53`, `1.1.1.1:443`, `[::ffff:<mac-lan-ip>]:7000` and `[::ffff:1.1.1.1]:443` all timed out. `curl --noproxy '*' https://1.1.1.1/` timed out. `agent_dropped` went from 0 to 49. The IPv4-mapped addresses went out as IPv4 and the agent rule caught them.
 
@@ -235,7 +238,113 @@ T3 server:
 - Root downloaded `SHA256SUMS` and `t3-0.1.10-linux-arm64.tar.gz` from the `v0.1.10` release. `SHA256SUMS` matched GitHub's asset digest `46bb6407...`, and `sha256sum -c` passed for the archive (`5ffbd224...`, also GitHub's digest).
 - Root unpacked it the way the launcher does (`--strip-components=1`) into `/home/agent/.t3/runtime/versions/0.1.10`, wrote `.install-complete` with `0.1.10`, and made the directory owned by root with no group or world write. `t3 --version` as `agent` printed `t3 v0.1.10`. `t3` sha256 is `1bd3c691d755fc1b46113f9067c535829146a30c62db2c126040297dd003e8f4`.
 - `~/.t3`, `~/.t3/runtime` and `~/.t3/runtime/versions` belong to `agent`, because the launcher writes lock files and launch scripts there. That means `agent` can rename or replace the version directory: `mv 0.1.10 0.1.10.moved` worked as `agent` and was moved back. Root ownership stops edits in place, not replacement. This is the situation the tamper test covers.
-- Whether T3 connects with no GitHub access and a root-owned runtime is pending the desktop app. If the server needs to write inside its own runtime directory, the connect will fail, and the fix is to make it `agent`-owned.
+- T3 connected with the root-owned runtime. Afterwards `~/.t3/runtime/versions` held only the root-owned `0.1.10`, and the Squid log had no `github.com` request.
+
+## T3 session
+
+Checked from T3 threads on 2026-11-18, one per agent, after the Claude token and the Codex login were in place.
+
+### Environment variables
+
+`env | cut -d= -f1 | sort` in each agent's tool shell showed no AWS, Google, Cloud SDK, Anthropic or OpenAI API variables except `CLAUDE_CODE_OAUTH_TOKEN`. It shows up in Codex's shell too, because both agents run as `agent` and get the login profile. Either agent can use the other's credentials. See [Questions](#questions-for-the-issue).
+
+### Tools each agent can call
+
+Claude has one MCP server, `t3-code`. Codex has two, `t3_code` and `t3_code_direct`. The built-in tools are each CLI's own, and they run in the VM.
+
+Claude's built-in tools: `Agent`, `AskUserQuestion`, `Bash`, `CronCreate`, `CronDelete`, `CronList`, `Edit`, `EnterPlanMode`, `EnterWorktree`, `ExitPlanMode`, `ExitWorktree`, `ListAgents`, `Monitor`, `NotebookEdit`, `Read`, `RemoteTrigger`, `ReportFindings`, `ScheduleWakeup`, `SendMessage`, `Skill`, `TaskStop`, `ToolSearch`, `WebFetch`, `WebSearch`, `Workflow`, `Write`.
+
+Codex's built-in tools: `apply_patch`, `clock.sleep`, `clock__curr_time`, `collaboration.followup_task`, `collaboration.interrupt_agent`, `collaboration.list_agents`, `collaboration.send_message`, `collaboration.spawn_agent`, `collaboration.wait_agent`, `create_goal`, `exec_command`, `functions.exec`, `functions.request_user_input_async`, `functions.send_message_to_user_async`, `functions.wait`, `get_goal`, `image_gen__imagegen`, `list_mcp_resource_templates`, `list_mcp_resources`, `read_mcp_resource`, `update_goal`, `update_plan`, `view_image`, `web__run`, `write_stdin`.
+
+T3 tools, the same set for both agents except where noted:
+
+| Group | Tools | Where they act |
+|---|---|---|
+| Threads | `t3_thread_configure`, `t3_thread_interrupt`, `t3_thread_launch`, `t3_thread_list`, `t3_thread_organize`, `t3_thread_read`, `t3_thread_search`, `t3_thread_send`, `t3_thread_send_attachments`, `t3_thread_transfer`, `t3_thread_update`, `t3_thread_wait`, `create_threads` | VM server's own state. Both agents saw only the VM's threads and projects, none of the Mac's. |
+| Delegation and tasks | `orchestrator_capabilities`, `delegate_task`, `task_cancel`, `task_status`, `t3_queue`, `t3_pending_request`, `t3_background_wait`, `t3_workflow_stop` | VM. Children run on the VM server. |
+| Scheduling | `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task`, `run_scheduled_task_now` | VM. |
+| Pull requests | `link_pull_request`, `link_pull_requests`, `unlink_pull_request`, `unlink_pull_requests`, `list_thread_pull_requests`, `watch_pull_request`, `unwatch_pull_request`, `read_pull_request_guide`, `write_pull_request_guides` | VM. `github.com` is not on the allowlist. |
+| Projects and worktrees | `t3_project_*` (clone, create, delete, list, read, update), `t3_worktree_handoff`, `t3_worktree_list`, `t3_worktree_status` | VM. |
+| Environment, attachments, theme | `t3_environment_read`, `t3_environment_preferences_update`, `t3_attachment_prepare_upload`, `t3_attachment_discard`, `t3_theme_read`, `t3_theme_set` | VM server's settings. |
+| Browser preview | `preview_*` (act, dialog, evaluate, navigate, open, recording start and stop, resize, set appearance, snapshot, status, wait for), `t3_preview_close`, `t3_preview_list`, `html_preview` | VM. The VM server tries to download its browser and fails, because `storage.googleapis.com` is blocked. Keep it blocked. |
+| Devices | `device_list`, `device_open`, `device_close`, `device_screenshot` | Off. The server answers "Agent device access is turned off for this environment." That gate lives in the VM server, and the device hub it would start runs in the VM too. |
+| Messages to the user | `send_to_user`, `request_secret` | Text shown in the Mac app. |
+| `html_render` | `html_render` | **The Mac.** See below. |
+| Codex only | `t3_code_direct`: `delegate_task`, `t3_thread_wait` | VM. |
+
+### html_render reaches the Mac's network
+
+`html_render` shows an agent's HTML page inline in the Mac app's chat. The page runs with scripts on, and it can send network requests from the Mac.
+
+Test: a listener on the Mac, `python3 -m http.server 8765 --bind 127.0.0.1`. The VM can't reach that address (`hostLoopback: false`, and the nftables and Squid private-range blocks). The Claude agent called `html_render` with an `<img>` and a `fetch(..., {mode:'no-cors'})`, both pointing at `http://127.0.0.1:8765/`. The listener logged both requests within seconds. It also logged two requests from an earlier probe page about 5 seconds before, which looks like that page drawing again when the thread opened. The Codex agent declined to make the call. Its refusal is model behavior, not a control.
+
+So an agent in the VM can make the Mac send requests while someone has its thread open. It can:
+
+- send anything it can read in the VM, such as its tokens and the project code, to any internet host from the Mac's network, bypassing Squid and nftables
+- send requests to services on the Mac's localhost and the LAN
+
+The test only showed requests to the Mac's loopback. Nothing in the page's policy treats LAN or internet destinations differently, but they weren't tested.
+
+The page can't read the responses unless the target allows it through CORS (origin `null` or `*`), or is a WebSocket server that doesn't check `Origin`. It can still send blind GETs and form POSTs, and time loads to scan ports. T3's own server-side renderer for these pages blocks loopback and private ranges and turns off WebRTC (`publicProxy.ts`, `headlessChrome.ts`). The desktop renderer does neither. It can't reach the app's cookies, storage or APIs, because the frame has an opaque origin. It runs whenever the thread shows it, without a click, and again when the thread is reopened or the page is expanded.
+
+Why, from T3's public source (the same in the `v0.1.10` tag and `main`):
+
+- `HtmlRender.publish` stores the page as an attachment on the VM server. The app loads it in an iframe from a signed URL on the SSH tunnel's Mac loopback port, so the Mac's Chromium makes every request the page asks for.
+- `apps/server/src/http.ts` sends HTML attachments with `Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups allow-downloads`. It has no `default-src` or `connect-src` directive. The SVG policy has `default-src 'none'`.
+- The chat's iframe (`HtmlRenderDocument` in `apps/web/src/components/files/BrowserDocumentFrame.tsx`) has `sandbox="allow-scripts allow-forms"`. A sandbox attribute can't restrict the network.
+- Chromium's Local Network Access checks don't stop it. The page comes from a loopback address, so loopback and LAN destinations are not "more private" than its origin.
+
+Blocking the tool in the VM won't hold. Claude's MCP bearer token is on its command line (`--mcp-config`), so any `agent` process can read it from `/proc/<pid>/cmdline` and call the server directly. `agent` can also replace the server, so a fix in the server's CSP header is no boundary either. The fix has to be in the desktop app, for example a strict CSP added by Electron's main process to remote-environment render responses. It also has to block the frame navigating itself and submitting forms, and cover WebSockets and WebRTC.
+
+The chat frame blocks popups and downloads. Opening an external URL from it goes through the app's link bridge, which needs a user click. T3's generic HTML file preview and guest shares use the wider `allow-popups allow-downloads` flags and were not checked.
+
+Decision: the VM stays in use with this hole, recorded as an accepted risk. It matters most for unattended runs on untrusted repos.
+
+### Other T3 findings
+
+- Codex gets its MCP token over the app-server's stdin, not its command line, and `kernel.yama.ptrace_scope` is `1`, so a tool shell can't read it from process memory.
+- No MCP bearer token appears in `~/.t3/userdata/logs`, `~/.codex/sessions` or `~/.claude`. The check counted matches without printing them.
+- `agent` owns `~/.t3/userdata/secrets/`, which holds the VM server's signing keys (`mcp-oauth-signing-key.bin`, `server-signing-key.bin` and others).
+- Squid denied `sdmntpr*.oaiusercontent.com` and `ab.chatgpt.com` for Codex. Codex still ran shell commands and answered.
+- The VM stopped without warning six times on 2026-11-18, at 01:01, about 14:20, about 14:23, 15:05, 16:55 and 22:20. The last three ended boots that had run for 42, 32 and 16 minutes. Each time `limactl start wardian-spike` brought it back with nftables, Squid, `ssh.socket` and polkit active. The cause is unknown.
+
+## Toy task
+
+The toy project is the same as phase 1: `/home/agent/toy` in the guest and `~/Developer/wardian-toy` on the Mac, with `words.py` to implement and `test_words.py` to pass. Each agent ran in its own T3 thread in full-access mode, one after the other, with the prompt "Create a branch named agent/<agent>-top-words from main. Implement top_words in words.py so that `python3 -m unittest` passes. Don't change test_words.py. Commit your change on that branch." Codex's prompt started with `git switch main`.
+
+| Agent | Branch | Commit | Committed at (UTC) | Result |
+|---|---|---|---|---|
+| Claude Code | `agent/claude-top-words` | `11ac489` | 22:07:00 | 6 lines in `words.py`: a `Counter` over `re.findall(r"[a-z']+", text.lower())`, sorted by count then word |
+| Codex | `agent/codex-top-words` | `a3d21a5` | 22:10:39 | 13 lines in `words.py`: `groupby` over letters and apostrophes with `casefold()`, and `[]` for `n <= 0` |
+
+Neither asked for approval. Both commits touch only `words.py` and add no file, process or network access. Claude's version slices with `[:n]`, so a negative `n` drops words from the end, which the tests don't cover. The diffs were read on the Mac. The tests ran in the VM as `agent`, from a `git archive` of each branch, and both printed `Ran 2 tests` and `OK`. They were not run on the Mac, because that would run VM-written code there.
+
+The Mac fetched both branches with the filtered command in [User steps](#user-steps). It exited 0 and printed only the two forced updates, since phase 1's branches had the same names.
+
+### Hosts each agent used
+
+Squid, for the boot the runs were in (22:04 to 22:20):
+
+| Host | Status | Who |
+|---|---|---|
+| `chatgpt.com` | 200 | Codex: model, models list, analytics, the Responses WebSocket |
+| `api.anthropic.com` | 200 | Claude Code |
+| `sdmntprsouthcentralus.oaiusercontent.com`, `sdmntprcentralus.oaiusercontent.com`, `sdmntprwestus.oaiusercontent.com` | 403 | Codex, five tries each time it starts |
+| `ab.chatgpt.com` | 403 | Codex, once |
+
+Claude's model traffic went through one `api.anthropic.com` tunnel that opened at 22:06:53 and stayed open 300 seconds, with 271 KB sent and 17 KB received. Codex opened many short `chatgpt.com` tunnels.
+
+### Codex's transport
+
+Codex's log (`~/.codex/logs_2.sqlite`) has `codex_api::endpoint::responses_websocket` logging `connecting to Responses WebSocket` and then `successfully connected to Responses WebSocket status=101`. The WebSocket runs inside a CONNECT tunnel to `chatgpt.com:443`, so Squid sees only the host name. The models list and analytics go over plain HTTPS POSTs and GETs to `chatgpt.com/backend-api/codex/...`.
+
+The same log shows the Codex app server starting a "remote control websocket" loop to `https://chatgpt.com/backend-api/` with `server_name=lima-wardian-spike` and `current_status=Disabled`. It stayed disabled. `codex features list` shows `remote_control` as `removed`, so there is no feature flag to turn it off in managed config. If the account ever enables it, ChatGPT could drive this Codex through the allowlisted host.
+
+### Controls after the runs
+
+As `agent`: `sudo -n true` exits 1, `crontab -l` gets `You (agent) are not allowed to use this program`, `loginctl` shows `Linger=no`, `/etc/wardian/claude-token` is still `root:agent 0640` with its 00:38 timestamp, and `sshd-vsock.socket` and `sshd-unix-local.socket` are masked. `nft -c -f /etc/nftables.conf` passes. nftables, Squid and `ssh.socket` are active.
+
+The kernel log for the run boot has 52 `wardian-drop` lines for `agent` (UID 1001), all UDP to 192.168.5.2 port 53. Something running as `agent` tries DNS directly and gets dropped, as designed. There were no other `agent` drops and no `wardian-root` lines.
 
 ## Files agent can't write
 
@@ -243,7 +352,7 @@ As `agent`, appending to each of these failed with `Permission denied`: `/usr/bi
 
 Creating a file failed with `Permission denied` in `/etc/wardian`, `/etc/claude-code`, `/etc/codex`, `/opt/codex/0.169.0/bin`, `/usr/local/bin`, `/etc/profile.d` and the T3 runtime directory. `find /opt/codex /etc/claude-code /etc/codex /etc/wardian <t3 runtime> -writable` as `agent` printed nothing.
 
-`/etc/wardian` is `root:agent 0750` and holds no token yet. The token file will be `root:agent 0640`, readable by `agent` and not writable.
+`/etc/wardian` is `root:agent 0750`. The checks above ran before the token was installed. The token file is now `root:agent 0640`, readable by `agent`, and an append as `agent` got `Permission denied`.
 
 `agent` can still write `~/.claude/settings.json` and `~/.codex/config.toml`. Both CLIs apply the root-owned managed files over those, as phase 1 tested for Codex.
 
@@ -256,6 +365,12 @@ Creating a file failed with `Permission denied` in `/etc/wardian`, `/etc/claude-
 - Positive control: with the rule moved out and polkit restarted, `agent`'s `loginctl enable-linger` exited 0. After disabling it, restoring the rule and restarting polkit, it was denied again.
 
 Lima turns on linger for its own `lima` admin account at boot. That account is outside `agent`'s reach.
+
+## Cron
+
+The review after the first commit found a second way for `agent` to start processes at boot without an SSH login. `cron` 3.0pl1 was enabled, neither `/etc/cron.allow` nor `/etc/cron.deny` existed, and `agent` could run `crontab`. An `@reboot` job would start as `agent` even on a boot where nftables failed to load. `agent` had no crontab at the time. `at` is not installed.
+
+`/etc/cron.allow` (`root:root 0644`) now holds one line, `root`. As `agent`, `crontab -l` and `crontab -` both print `You (agent) are not allowed to use this program (crontab)` and exit 1, and `/var/spool/cron/crontabs/` stays empty. `agent` can't write `/etc/cron.allow`. `agent` can't write the spool directly either, since it is `root:crontab 1730` and `agent` is not in the `crontab` group. The failed-firewall boot test ran before this change and was not repeated.
 
 ## Time sync and timers
 
@@ -294,7 +409,7 @@ At 00:07:16 the harness recorded `nftables.service` failed, `ssh.socket` and `ss
 
 From the Mac, `ssh -o BatchMode=yes wardian-spike true` ran every 5 seconds. From 00:07:15 to 00:09:16 every attempt failed with `kex_exchange_identification: read: Connection reset by peer`. The Lima host agent accepts on the Mac's port 60022 and resets the connection when the guest refuses. After the harness restored the config at 00:09:16, `nftables.service` and `ssh.socket` were active, both tables were loaded, port 22 listened, and the 00:09:21 attempt exited 0. `limactl start` waited for SSH and finished with `READY` at 00:09:18.
 
-So a firewall that fails to load keeps SSH closed, and T3 can't reach the guest. With no table loaded, though, the guest has no outbound filtering either. Nothing ran as `agent` during that boot, since `agent` has no linger and logs in only through SSH. Squid was running and had no firewall around it.
+So a firewall that fails to load keeps SSH closed, and T3 can't reach the guest. With no table loaded, though, the guest has no outbound filtering either. The journal for that boot has no entries from `agent` (UID 1001) before the firewall was restored at 00:09:16. The first is `agent`'s user manager starting at 00:09:20, after SSH reopened. `agent` has no linger, and it had no crontab, though at that point it could have made one. See [Cron](#cron). Squid was running and had no firewall around it.
 
 After the test, root deleted the harness, checked the config with `nft -c`, and rebooted. The clean boot had `nftables`, `ssh.socket`, `squid` and `polkit` active, `table inet wardian` and `table ip nat` loaded, only `ssh.socket` on port 22, no `/run/ssh-unix-local`, and only the guest agent on vsock. As `agent`, `chatgpt.com` worked, `example.com` got 403, `getent` failed, linger was denied, and the toy repo was intact.
 
@@ -311,13 +426,15 @@ The clean boot's journal shows the initramfs running its own systemd-networkd be
 [2.642212] lima-wardian-spike systemd[1]: Starting systemd-networkd.service - Network Management...
 ```
 
-The initramfs contains networkd but no nftables, so a DHCP exchange with 192.168.5.2 happens about one second before the rules load. In the real root, nftables finishes before `network-pre.target` and networkd, as phase 1 read from the unit file. No user process exists during the initramfs stage, so this is DHCP and kernel IPv6 traffic only, and it goes to Lima's own address.
+The initramfs contains networkd but no nftables, so a DHCP exchange with 192.168.5.2 happens about one second before the rules load. In the real root, nftables finishes before `network-pre.target` and networkd, as phase 1 read from the unit file. The journal records only this DHCP exchange, which goes to Lima's own address. No packet capture covered the time before the rules load, so these notes can't say that nothing else left. A capture from first boot to the `Finished nftables.service` line would settle it.
 
 Drops logged during the clean boot: `systemd-network` router solicitations to `ff02::2`, two kernel MLD reports to `ff02::16`, and one UDP packet each from `_chrony` (UID 988) to `127.0.0.1:323` and `[::1]:323`. Port 323 is chronyd's command port, so something ran `chronyc` as `_chrony` and found no chronyd. Removing the chrony package would stop it.
 
-## Pending user steps
+## User steps
 
-These need the Keychain, a browser login or the T3 desktop app. They run in this order on the same VM.
+These need the Keychain, a browser login or the T3 desktop app. They ran in this order on the same VM.
+
+All ran except step 6. Step 1 printed `prefix ok` and a length of 108, the append got `Permission denied`, and Claude answered `pong`. For steps 3 and 4, see [T3 session](#t3-session). For step 5, see [Toy task](#toy-task). Steps 7 and 8 are in [Acceptance criteria](#acceptance-criteria). Step 6 was not run; see the tamper row there.
 
 1. Copy the Claude token into the guest over stdin, then check its prefix and length without printing it:
 
@@ -330,6 +447,8 @@ These need the Keychain, a browser login or the T3 desktop app. They run in this
 
    The append must fail with `Permission denied` and Claude must answer `pong`.
 
+   Don't rerun these as written. If the Keychain lookup fails, the first command truncates the existing token before anything checks it. If the file's permissions ever regress, the append test adds `x` to the live token and still runs Claude. A rebuild should validate a temporary copy before moving it into place, and test writability without writing.
+
 2. Log Codex in as `agent` and approve the device code in a browser:
 
    ```sh
@@ -340,7 +459,16 @@ These need the Keychain, a browser login or the T3 desktop app. They run in this
 
 4. In a T3 session for each agent, ask it to run `env | cut -d= -f1 | sort` and to list every tool it can call. Check that no tool acts on the Mac.
 
-5. Run the toy task with each agent in full-access mode, as in phase 1. Then fetch the branches from the Mac with the phase 1 fetch command.
+5. Run the toy task with each agent in full-access mode, as in phase 1. Then fetch the branches from the Mac in `~/Developer/wardian-toy`, with the output filtered. Phase 1 showed that the plain fetch command passes escape sequences to the Mac terminal, both from `agent`'s `~/.bashrc` and from git's `remote:` lines. The filter keeps only tab, newline and printable ASCII, and `pipefail` keeps git's exit status:
+
+   ```sh
+   ( set -o pipefail
+     git -c transfer.fsckObjects=true fetch --no-tags --no-recurse-submodules \
+       sandbox '+refs/heads/agent/*:refs/remotes/sandbox/agent/*' 2>&1 \
+       | LC_ALL=C tr -cd '\011\012\040-\176' )
+   ```
+
+   Both phase 1 cases were rerun against this command. With a `printf` of a color code and an OSC title code added to the top of `agent`'s `~/.bashrc`, the plain fetch printed `^[[31m` and `^[]0;...^G` under `cat -v`, and the filtered fetch printed `[31m` and `]0;...` with no ESC or BEL bytes. `.bashrc` was restored to its original sha256 afterwards. A local repo whose `uploadpack.packObjectsHook` printed the same codes gave the same result after `remote:`. A fetch from a missing repo through the filter exited 128 in zsh.
 
 6. Tamper test: as `agent`, replace or modify the T3 server under `~/.t3/runtime/versions/0.1.10`, reconnect, and ask for a Mac-side tool. The desktop app must refuse.
 
@@ -356,7 +484,7 @@ limactl shell wardian-spike sudo journalctl -u squid -o cat | grep '^{' | python
 
 ## Questions for the issue
 
-- The issue says a T3 session has no Anthropic API variables. Claude Code logs in here through `CLAUDE_CODE_OAUTH_TOKEN`, which the login profile exports. Should the issue name that one variable as the allowed exception?
+- The issue says a T3 session has no Anthropic API variables. Claude Code logs in here through `CLAUDE_CODE_OAUTH_TOKEN`, which the login profile exports. Should the issue name that one variable as the allowed exception? Codex's tool shell sees it too, and Claude can read Codex's `~/.codex/auth.json`, because both run as `agent`. Should a later build give each agent its own user?
 - If `codex cloud` works through `chatgpt.com`, the only fix at the proxy is TLS inspection, which the design avoids. Is a failing `codex cloud` check a no-go, or does the criterion change to "documented and accepted"?
 - vsock is still open to `agent`. Phase 1 found no listener on the host side, and this run did not change that. The issue does not require closing it. Should a later ticket restrict `AF_VSOCK` for `agent`?
 - Root may still reach public addresses on ports 80 and 443, now logged. Should the automated build drop root's outbound traffic entirely once provisioning is done?
@@ -554,11 +682,17 @@ if [ -r /etc/wardian/claude-token ]; then
 fi
 ```
 
+`/etc/cron.allow` (`root:root 0644`):
+
+```
+root
+```
+
 `/etc/polkit-1/rules.d/50-wardian-linger.rules`:
 
 ```
-// Wardian: agent may not turn on linger, so none of its processes outlive
-// its sessions or start at boot. Root does not go through polkit.
+// Wardian: agent may not turn on linger, so systemd does not start its
+// user manager at boot. Root does not go through polkit.
 polkit.addRule(function(action, subject) {
     if ((action.id == "org.freedesktop.login1.set-self-linger" ||
          action.id == "org.freedesktop.login1.set-user-linger") &&
