@@ -1,6 +1,6 @@
-# Davylamp
+# Wardian
 
-Davylamp runs AI coding agents (Claude Code and Codex) in disposable Lima VMs on a Mac. Each agent can reach one project's code and an allowlist of network destinations, and every request it makes is logged.
+Wardian runs AI coding agents (Claude Code and Codex) in disposable Lima VMs on a Mac. Each agent can reach one project's code and an allowlist of network destinations, and every request it makes is logged.
 
 ## Agent skills
 
