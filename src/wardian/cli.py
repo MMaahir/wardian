@@ -220,7 +220,13 @@ def create(name: str) -> None:
         "ansible_port": port,
         "ansible_user": user,
         "ansible_ssh_private_key_file": identity,
-        "ansible_ssh_common_args": shlex.join(ssh_options(name)),
+        # Extra vars beat ANSIBLE_* settings from the environment, such as
+        # ANSIBLE_HOST_KEY_CHECKING=false. ssh_args come first on the ssh
+        # command line, and ssh keeps the first value of each option. They
+        # replace Ansible's ControlPersist default, so no connection is reused.
+        "ansible_connection": "ssh",
+        "ansible_host_key_checking": True,
+        "ansible_ssh_args": shlex.join(ssh_options(name)),
     }
     run(
         [
