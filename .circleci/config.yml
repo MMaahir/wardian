@@ -30,7 +30,9 @@ jobs:
           name: Install Incus
           command: |
             sudo apt-get update
-            sudo apt-get install --yes --no-install-recommends incus
+            # incus-base is the container daemon without QEMU. Incus needs
+            # dnsmasq for the bridge, which incus-base only recommends.
+            sudo apt-get install --yes --no-install-recommends incus-base dnsmasq-base jq
             sudo incus admin init --minimal
 
       # The only change to the host's own networking. Docker on the host sets
