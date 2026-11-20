@@ -10,6 +10,8 @@ Wardian puts each project in its own VM (the sandbox). The agent gets the projec
 
 ## What it protects
 
+This section and the next describe the design in issue #1. [Status](#status) says which parts are on `main` today.
+
 - **Your other projects.** The sandbox has no host mounts, and holds only the one repo you push into it. It can't reach services on your Mac or your LAN.
 - **Your sensitive files.** Nothing from your home folder is shared with the VM. Code comes back only by git, as refs that don't touch your working tree. Wardian lists changed files that Mac tools run on their own, such as dotfiles, `package.json` and `Makefile`, so you see them before you merge.
 - **Your credentials.** No SSH agent forwarding, no host API keys and no cloud or forge tokens enter the sandbox. The only credential inside is the chosen agent's own login.
@@ -27,8 +29,6 @@ The full list of accepted risks is in the spec, [issue #1](https://github.com/MM
 
 ## How it works
 
-This is the design in issue #1. [Status](#status) says which parts are on `main` today.
-
 ```text
 Mac                                    Sandbox (Lima VM)
 ───                                    ─────────────────
@@ -40,9 +40,9 @@ your repo ── wardian push / fetch ───▶ /home/agent/project
 ```
 
 - The VM comes from Wardian's own Lima template: pinned Ubuntu image, no mounts, no port forwarding, no access to the Mac's loopback.
-- Agents run as `agent`, an unprivileged user. Their only root access is `sudo wardian-apt <packages>`, which installs new Ubuntu packages and nothing else.
+- Agents run as `agent`, an unprivileged user. Their only root access is `sudo wardian-apt <packages>`, which can only install new system packages.
 - nftables drops traffic to private, link-local and metadata addresses for every user, so even root inside the VM can't reach your Mac or LAN without breaking the firewall first.
-- Every control has a threat ID and a test that fails when the control is removed. CI proves that on every change.
+- Every control has a threat ID and a test that checks it from outside. CI runs the tests on every change, and a mutation job removes controls one at a time to check their tests fail.
 
 [ADR 0001](docs/adr/0001-open-egress-instead-of-an-allowlist.md) explains why agents get the open internet rather than an allowlist.
 
@@ -89,8 +89,8 @@ A typical session:
 
 1. `wardian create` a sandbox for the project.
 2. Push your project's current commit into it. Until #28, this is the manual git setup in [docs/cli.md](docs/cli.md#git).
-3. Connect T3 Code to the sandbox and give the agent a task. Agents work on `agent/<task>` branches.
-4. Fetch the agent's branches back to your Mac, read the diff and the list of auto-run files, and merge the commit you read by its SHA.
+3. Connect T3 Code to the sandbox as `agent` (needs #27) and give the agent a task. Agents work on `agent/<task>` branches.
+4. Fetch the agent's branches back to your Mac, read the diff (and, from #28, the list of files Mac tools run on their own), and merge the commit you read by its SHA.
 5. `wardian destroy` the sandbox when the work is merged.
 
 Run the agent's code and tests in the sandbox, not on your Mac, until you've reviewed it.
@@ -107,7 +107,7 @@ uv run ruff format --check
 
 The unit tests need no VM. `WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_git.py` runs the git tests against a real sandbox and destroys it at the end.
 
-CI runs on CircleCI: the playbook is applied twice inside an Incus container on an Arm VM, the control tests run there, and a mutation job removes each control and checks its test fails.
+CI runs on CircleCI: the playbook is applied twice inside an Incus container on an Arm VM, the control tests run there, and a mutation job removes controls one at a time and checks their tests fail.
 
 ## Docs
 
