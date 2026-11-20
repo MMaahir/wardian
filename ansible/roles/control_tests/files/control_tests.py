@@ -8,16 +8,17 @@ The playbook installs this file root-owned, and root runs it:
 
     /usr/bin/python3 -I control_tests.py --env lima
 
-Root only reads the firewall's counters. Every probe runs as agent with an
-empty environment, so nothing agent can write changes the result:
+Root sets up the fixtures, reads the firewall's counters, and runs the probes
+that must fail for root too. Every other probe runs as agent with an empty
+environment, so nothing agent can write changes the result:
 
     runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin <probe>
 
 It prints one JSON object per threat ID and exits 1 if any test fails. A
 threat ID that applies to the environment but has no test counts as a failure,
-so deleting a test fails the run. Standard library only. Network probes use
-`curl -q`, which reads no config file, and `dig -r`, which doesn't read
-~/.digrc.
+so deleting a test fails the run. --only runs the named IDs and skips the
+rest; the mutation job uses it. Standard library only. Network probes use
+`curl -q`, which reads no config file.
 """
 
 import argparse
@@ -28,19 +29,19 @@ import pwd
 import stat
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 
 # Every threat ID is mandatory in its environment.
 THREAT_IDS = {
-    "T01": ("both", "agent can't use sudo"),
-    "T02": ("both", "agent can't resolve names through any path"),
-    "T03": ("both", "Squid denies a name that isn't on the allowlist"),
-    "T04": ("both", "Squid lets agent reach an allowlisted name"),
-    "T05": ("both", "Squid denies private addresses"),
-    "T06": ("both", "nftables drops and counts agent's direct connections"),
+    "T01": ("both", "agent's only sudo grant is wardian-apt"),
+    "T06": ("both", "nftables drops private IPv4 and IPv6 for agent and root"),
     "T07": ("both", "agent can't write the agent CLIs, their config or the token"),
-    "T08": ("both", "Squid denies the agent CLIs' update hosts"),
-    "T09": ("both", "agent's environment has no cloud or AI API variables"),
-    "T10": ("both", "Squid's user and logship can't read the Claude token"),
+    "T09": ("both", "agent's environment has no proxy, cloud or AI API variables"),
+    "T10": ("both", "other users can't read the Claude token"),
+    "T11": ("both", "agent downloads from a public package registry directly"),
+    "T12": ("both", "wardian-apt installs new packages and refuses the rest"),
 }
 for _threat_id, (_env, _) in THREAT_IDS.items():
     if _env not in ("ci", "lima", "both"):
@@ -48,57 +49,66 @@ for _threat_id, (_env, _) in THREAT_IDS.items():
 
 TESTS = {}
 
+PATH = "PATH=/usr/bin:/bin"
 AS_AGENT = [
     "/usr/sbin/runuser", "-u", "agent", "--",
-    "/usr/bin/env", "-i", "HOME=/home/agent", "PATH=/usr/bin:/bin",
+    "/usr/bin/env", "-i", "HOME=/home/agent", PATH,
 ]  # fmt: skip
-PROXY = "http://127.0.0.1:3128"
-BLOCKED_NAME = "example.com"
-ALLOWED_URL = "https://api.anthropic.com/"
-# Lima's resolver and host, private ranges, the metadata address, loopback,
-# and an IPv4-mapped IPv6 address.
-PRIVATE_ADDRESSES = (
-    "192.168.5.2",
-    "10.0.0.1",
-    "172.16.0.1",
-    "100.64.0.1",
-    "169.254.169.254",
-    "127.0.0.1",
-    "[::1]",
-    "[fd00::1]",
-    "[fe80::1]",
-    "[::ffff:192.168.5.2]",
+# dpkg needs the sbin directories.
+AS_ROOT = ["/usr/bin/env", "-i", "HOME=/root", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"]
+WRAPPER = "/usr/local/sbin/wardian-apt"
+# T06's fixture: a listener in its own network namespace, behind a veth pair,
+# so traffic to it leaves through the output chain like traffic to the Mac.
+FIXTURE_NS = "wardian-t06"
+FIXTURE_LINK = "wardian-t06"
+FIXTURE_PORT = 8080
+FIXTURE_HOST4, FIXTURE_PEER4 = "172.31.255.1", "172.31.255.2"
+FIXTURE_HOST6, FIXTURE_PEER6 = "fd77:6172:6469::1", "fd77:6172:6469::2"
+FIXTURE_NAME = "wardian-fixture.test"
+FIXTURE_SERVER = f"""
+import socket
+server = socket.create_server(
+    ("::", {FIXTURE_PORT}), family=socket.AF_INET6, dualstack_ipv6=True
 )
-PUBLIC_ADDRESS = "1.1.1.1"
+print("ready", flush=True)
+while True:
+    conn, _ = server.accept()
+    conn.sendall(b"HTTP/1.0 200 OK\\r\\nContent-Length: 0\\r\\n\\r\\n")
+    conn.close()
+"""
+# T11: a package index any project might download from.
+REGISTRY_URL = "https://pypi.org/simple/pip/"
 TOKEN = "/etc/wardian/claude-token"  # noqa: S105 - a path, not a token
-# What agent must not change: the agent CLIs, their managed config, the token,
-# and the files that put the token and the proxy into its environment. Each
-# tree is checked to every depth, each path on its own.
-PROTECTED_TREES = ("/opt/codex", "/etc/claude-code", "/etc/codex", "/etc/wardian")
+# What agent must not change: the agent CLIs, their managed config and
+# instructions, the token, wardian-apt and its firewall snapshot, and the
+# files that set agent's environment. Each tree is checked to every depth,
+# each path on its own.
+PROTECTED_TREES = (
+    "/opt/codex",
+    "/etc/claude-code",
+    "/etc/codex",
+    "/etc/wardian",
+    "/var/lib/wardian",
+)
 PROTECTED_PATHS = (
     "/usr/bin",
     "/usr/bin/claude",
     "/usr/local/bin",
     "/usr/local/bin/codex",
     "/etc/claude-code/managed-settings.json",
+    "/etc/claude-code/CLAUDE.md",
     "/etc/codex/managed_config.toml",
+    "/etc/codex/requirements.toml",
     "/usr/local/sbin",
     "/usr/local/sbin/wardian-install-claude-token",
+    WRAPPER,
+    "/etc/sudoers.d",
+    "/etc/sudoers.d/wardian-apt",
     "/etc/profile.d",
     "/etc/profile.d/wardian-claude-token.sh",
+    "/etc/profile.d/wardian-sandbox.sh",
     "/etc/environment",
     TOKEN,
-)
-# Where Claude Code (native installer, npm) and Codex (GitHub releases) fetch
-# updates. The apt repo is on downloads.claude.ai too.
-UPDATE_HOSTS = (
-    "downloads.claude.ai",
-    "storage.googleapis.com",
-    "registry.npmjs.org",
-    "github.com",
-    "api.github.com",
-    "objects.githubusercontent.com",
-    "release-assets.githubusercontent.com",
 )
 # AWS, Google (including Gemini), Cloud SDK, Anthropic and OpenAI API variables.
 # CLAUDE_CODE_OAUTH_TOKEN is allowed: it is the sandbox's own Claude token.
@@ -111,6 +121,8 @@ FORBIDDEN_ENV_PREFIXES = (
     "ANTHROPIC_",
     "OPENAI_",
 )
+# Matched without case, since curl and others read both spellings.
+PROXY_VARIABLES = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy")
 
 
 def control(threat_id):
@@ -124,9 +136,9 @@ def control(threat_id):
     return register
 
 
-def as_agent(*argv, timeout=60):
-    return subprocess.run(
-        [*AS_AGENT, *argv],
+def run(argv, timeout=60, check=False):
+    result = subprocess.run(
+        argv,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
@@ -135,50 +147,38 @@ def as_agent(*argv, timeout=60):
         # sudo keeps the admin's working directory, which agent can't enter.
         cwd="/",
     )
+    if check and result.returncode != 0:
+        raise RuntimeError(
+            f"{' '.join(argv)} exited {result.returncode}: {result.stderr.strip()}"
+        )
+    return result
+
+
+def as_agent(*argv, timeout=60):
+    return run([*AS_AGENT, *argv], timeout=timeout)
 
 
 def as_user(user, *argv, timeout=30):
-    return subprocess.run(
-        [
-            "/usr/sbin/runuser",
-            "-u",
-            user,
-            "--",
-            "/usr/bin/env",
-            "-i",
-            "PATH=/usr/bin:/bin",
-            *argv,
-        ],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        check=False,
-        text=True,
+    return run(
+        ["/usr/sbin/runuser", "-u", user, "--", "/usr/bin/env", "-i", PATH, *argv],
         timeout=timeout,
-        # sudo keeps the admin's working directory, which agent can't enter.
-        cwd="/",
     )
 
 
-def curl(url, *options):
-    """Fetch url as agent. Return curl's exit code, CONNECT status and HTTP status."""
-    result = as_agent(
-        "curl", "-q", "--silent", "--show-error", "--output", "/dev/null",
-        "--connect-timeout", "5", "--max-time", "20",
-        "--write-out", "%{http_connect} %{http_code}",
-        *options, url,
-    )  # fmt: skip
-    connect, _, code = result.stdout.partition(" ")
-    return result.returncode, connect, code, result.stderr.strip()
+def curl_argv(url, *options):
+    """curl that prints the HTTP status and fails fast on a dropped connection."""
+    return [
+        "curl", "-q", "--silent", "--show-error", "--globoff",
+        "--output", "/dev/null", "--connect-timeout", "3", "--max-time", "20",
+        "--write-out", "%{http_code}", *options, url,
+    ]  # fmt: skip
 
 
 def counter(name):
-    result = subprocess.run(
+    result = run(
         ["/usr/sbin/nft", "--json", "list", "counter", "inet", "wardian", name],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        check=True,
-        text=True,
         timeout=30,
+        check=True,
     )
     for item in json.loads(result.stdout)["nftables"]:
         if "counter" in item:
@@ -187,102 +187,119 @@ def counter(name):
 
 
 @control("T01")
-def agent_cannot_sudo():
-    # `sudo -n true` would pass with a grant that leaves out `true`, such as
-    # NOPASSWD: /usr/bin/apt. `sudo -l` lists every grant, and only a user with
-    # none gets "may not run sudo".
+def agent_sudo_is_only_wardian_apt():
+    # `sudo -n true` would miss a grant that leaves out `true`. `sudo -l`
+    # lists every grant, and the one line after the header must be exactly
+    # the wrapper, as root, with no password.
     result = as_agent("sudo", "-n", "-l", timeout=30)
     output = (result.stdout + result.stderr).strip()
-    if result.returncode != 0 and "may not run sudo" in output:
-        return True, output
+    _, header, grants = result.stdout.partition("may run the following commands on")
+    lines = [line.strip() for line in grants.splitlines()[1:] if line.strip()]
+    expected = [f"(root) NOPASSWD: {WRAPPER}"]
+    if result.returncode == 0 and header and lines == expected:
+        return True, f"agent may run only: {lines[0]}"
     return False, f"sudo -n -l exited {result.returncode}: {output}"
 
 
-@control("T02")
-def agent_cannot_resolve():
-    # dig asks the resolver in /etc/resolv.conf over UDP and TCP. getent goes
-    # through glibc's resolver. resolvectl asks systemd-resolved, which is
-    # masked. Each must fail with the exit code for a lookup that got no
-    # answer, so a probe that can't run (env exits 127) doesn't pass: dig 9
-    # (no reply from a server), getent 2 (not found), resolvectl 1.
-    probes = (
-        (9, "dig", "-r", "+time=3", "+tries=1", BLOCKED_NAME),
-        (9, "dig", "-r", "+tcp", "+time=3", "+tries=1", BLOCKED_NAME),
-        (2, "getent", "hosts", BLOCKED_NAME),
-        (1, "resolvectl", "query", BLOCKED_NAME),
-    )
-    failures = []
-    details = []
-    for expected, *probe in probes:
-        result = as_agent(*probe)
-        details.append(f"{probe[0]} exited {result.returncode}")
-        if result.returncode != expected:
-            failures.append(
-                f"{' '.join(probe)} exited {result.returncode}, not {expected}: "
-                f"{result.stderr.strip()}"
-            )
-    if failures:
-        return False, "; ".join(failures)
-    return True, ", ".join(details)
+@contextmanager
+def fixture():
+    """Start T06's listener behind a veth pair. Yield a hosts file for its name."""
+    ip = "/usr/sbin/ip"
+
+    def cleanup():
+        # Deleting the namespace deletes the veth pair with it.
+        run([ip, "netns", "delete", FIXTURE_NS])
+        run([ip, "link", "delete", FIXTURE_LINK])
+
+    cleanup()
+    server = None
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            peer = f"{FIXTURE_LINK}p"
+            for argv in (
+                [ip, "netns", "add", FIXTURE_NS],
+                [ip, "link", "add", FIXTURE_LINK, "type", "veth", "peer", "name", peer],
+                [ip, "link", "set", peer, "netns", FIXTURE_NS],
+                [ip, "addr", "add", f"{FIXTURE_HOST4}/30", "dev", FIXTURE_LINK],
+                [ip, "-6", "addr", "add", f"{FIXTURE_HOST6}/64", "dev", FIXTURE_LINK, "nodad"],
+                [ip, "link", "set", FIXTURE_LINK, "up"],
+                [ip, "-n", FIXTURE_NS, "addr", "add", f"{FIXTURE_PEER4}/30", "dev", peer],
+                [ip, "-n", FIXTURE_NS, "-6", "addr", "add", f"{FIXTURE_PEER6}/64", "dev", peer, "nodad"],
+                [ip, "-n", FIXTURE_NS, "link", "set", peer, "up"],
+                # The self-check below connects to the namespace's own address.
+                [ip, "-n", FIXTURE_NS, "link", "set", "lo", "up"],
+            ):  # fmt: skip
+                run(argv, check=True)
+            server = subprocess.Popen(
+                [ip, "netns", "exec", FIXTURE_NS, "/usr/bin/python3", "-I", "-c", FIXTURE_SERVER],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                cwd="/",
+            )  # fmt: skip
+            if server.stdout.readline().strip() != "ready":
+                raise RuntimeError("the fixture listener didn't start")
+            # The listener answers inside its namespace, where no ruleset runs.
+            for address in (FIXTURE_PEER4, f"[{FIXTURE_PEER6}]"):
+                url = f"http://{address}:{FIXTURE_PORT}/"
+                result = run(
+                    [ip, "netns", "exec", FIXTURE_NS, *AS_ROOT, *curl_argv(url)]
+                )
+                if result.returncode != 0 or result.stdout != "200":
+                    raise RuntimeError(
+                        f"the fixture doesn't answer at {url}: {result.stderr}"
+                    )
+            hosts = Path(tmp) / "hosts"
+            hosts.write_text(f"{FIXTURE_PEER4} {FIXTURE_NAME}\n")
+            hosts.chmod(0o644)
+            yield hosts
+        finally:
+            if server is not None:
+                server.kill()
+                server.wait()
+            cleanup()
 
 
-@control("T03")
-def squid_denies_blocked_name():
-    exit_code, connect, code, stderr = curl(
-        f"https://{BLOCKED_NAME}/", "--proxy", PROXY
-    )
-    if exit_code != 0 and connect == "403":
-        return True, f"{BLOCKED_NAME}: CONNECT got 403"
-    return (
-        False,
-        f"{BLOCKED_NAME}: curl exited {exit_code}, CONNECT {connect}, HTTP {code} {stderr}",
-    )
-
-
-@control("T04")
-def squid_allows_allowlisted_name():
-    # Any HTTP reply means the tunnel opened and TLS completed.
-    exit_code, connect, code, stderr = curl(ALLOWED_URL, "--proxy", PROXY)
-    if exit_code == 0 and connect == "200" and code != "000":
-        return True, f"{ALLOWED_URL}: CONNECT 200, HTTP {code}"
-    return (
-        False,
-        f"{ALLOWED_URL}: curl exited {exit_code}, CONNECT {connect}, HTTP {code} {stderr}",
-    )
-
-
-@control("T05")
-def squid_denies_private_addresses():
-    failures = []
-    for address in PRIVATE_ADDRESSES:
-        exit_code, connect, _, stderr = curl(f"https://{address}/", "--proxy", PROXY)
-        if exit_code == 0 or connect != "403":
-            failures.append(
-                f"{address}: curl exited {exit_code}, CONNECT {connect} {stderr}"
-            )
-    if failures:
-        return False, "; ".join(failures)
-    return True, f"CONNECT got 403 for {len(PRIVATE_ADDRESSES)} private addresses"
+def with_hosts(hosts, argv):
+    """Run argv in a private mount namespace whose /etc/hosts is the hosts file."""
+    return [
+        "/usr/bin/unshare", "--mount", "--propagation", "private", "--",
+        "/bin/sh", "-ec", '/usr/bin/mount --bind "$1" /etc/hosts; shift; exec "$@"',
+        "sh", str(hosts), *argv,
+    ]  # fmt: skip
 
 
 @control("T06")
-def nftables_drops_direct_connection():
-    before = counter("agent_dropped")
-    exit_code, _, code, stderr = curl(
-        f"https://{PUBLIC_ADDRESS}/", "--connect-timeout", "3"
-    )
-    after = counter("agent_dropped")
-    # 28 is curl's timeout. A connection that opened and then failed TLS
-    # exits with another code.
-    if exit_code == 28 and after > before:
-        return (
-            True,
-            f"{PUBLIC_ADDRESS}: curl exited {exit_code}, agent_dropped {before} -> {after}",
+def nftables_drops_private_addresses():
+    failures = []
+    details = []
+    with fixture() as hosts:
+        targets = (
+            (f"http://{FIXTURE_PEER4}:{FIXTURE_PORT}/", "private4_dropped", False),
+            (f"http://[{FIXTURE_PEER6}]:{FIXTURE_PORT}/", "ipv6_dropped", False),
+            (f"http://{FIXTURE_NAME}:{FIXTURE_PORT}/", "private4_dropped", True),
         )
-    return False, (
-        f"{PUBLIC_ADDRESS}: curl exited {exit_code}, HTTP {code}, "
-        f"agent_dropped {before} -> {after} {stderr}"
-    )
+        for user, prefix in (("agent", AS_AGENT), ("root", AS_ROOT)):
+            for url, counter_name, by_name in targets:
+                argv = [*prefix, *curl_argv(url)]
+                if by_name:
+                    argv = with_hosts(hosts, argv)
+                before = counter(counter_name)
+                result = run(argv)
+                after = counter(counter_name)
+                if result.returncode == 0:
+                    failures.append(f"{user} reached {url}")
+                elif after <= before:
+                    failures.append(
+                        f"{user} to {url}: curl exited {result.returncode} but "
+                        f"{counter_name} stayed at {before}: {result.stderr.strip()}"
+                    )
+                else:
+                    details.append(f"{user} to {url}: dropped")
+    if failures:
+        return False, "; ".join(failures)
+    return True, "; ".join(details)
 
 
 @control("T07")
@@ -310,22 +327,8 @@ def agent_cannot_write_clis_or_token():
     return True, f"none of {count} paths is writable by agent"
 
 
-@control("T08")
-def squid_denies_update_hosts():
-    failures = []
-    for host in UPDATE_HOSTS:
-        exit_code, connect, _, stderr = curl(f"https://{host}/", "--proxy", PROXY)
-        if exit_code == 0 or connect != "403":
-            failures.append(
-                f"{host}: curl exited {exit_code}, CONNECT {connect} {stderr}"
-            )
-    if failures:
-        return False, "; ".join(failures)
-    return True, f"CONNECT got 403 for {len(UPDATE_HOSTS)} update hosts"
-
-
-def variable_names(output):
-    return {line.split("=", 1)[0] for line in output.splitlines() if "=" in line}
+def variables(output):
+    return dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
 
 
 @control("T09")
@@ -333,33 +336,33 @@ def agent_environment_has_no_api_variables():
     # A login goes through PAM, which reads /etc/environment, then the login
     # shell reads /etc/profile. su --login runs PAM like an SSH login and then
     # runs env as the "shell". bash reads /etc/profile but not agent's own
-    # dotfiles. Each probe has a variable it must find, so a probe that read
-    # nothing can't pass.
-    pam = subprocess.run(
-        ["/usr/bin/su", "--login", "--shell", "/usr/bin/env", "agent"],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=30,
-    )
+    # dotfiles. Each probe must find WARDIAN_SANDBOX=1, which both files set,
+    # so a probe that read nothing can't pass.
+    pam = run(["/usr/bin/su", "--login", "--shell", "/usr/bin/env", "agent"])
     profile = as_agent(
         "bash", "--noprofile", "--norc", "-c", ". /etc/profile && exec env"
     )
     failures = []
     names = set()
     for label, result, expected in (
-        ("su --login", pam, "HTTPS_PROXY"),
-        ("/etc/profile", profile, "CLAUDE_CODE_OAUTH_TOKEN"),
+        ("su --login", pam, ("WARDIAN_SANDBOX",)),
+        ("/etc/profile", profile, ("WARDIAN_SANDBOX", "CLAUDE_CODE_OAUTH_TOKEN")),
     ):
-        found = variable_names(result.stdout)
-        names |= found
-        if result.returncode != 0 or expected not in found:
+        found = variables(result.stdout)
+        names |= found.keys()
+        if found.get("WARDIAN_SANDBOX") != "1":
+            failures.append(f"{label} has no WARDIAN_SANDBOX=1")
+        missing = [name for name in expected if name not in found]
+        if result.returncode != 0 or missing:
             failures.append(
-                f"{label} exited {result.returncode} without {expected}: "
+                f"{label} exited {result.returncode} without {', '.join(missing)}: "
                 f"{result.stderr.strip()}"
             )
-    forbidden = sorted(n for n in names if n.startswith(FORBIDDEN_ENV_PREFIXES))
+    forbidden = sorted(
+        n
+        for n in names
+        if n.startswith(FORBIDDEN_ENV_PREFIXES) or n.lower() in PROXY_VARIABLES
+    )
     if forbidden:
         failures.append("forbidden variables: " + ", ".join(forbidden))
     if failures:
@@ -384,30 +387,112 @@ def others_cannot_read_token():
     }
     if members != {"agent"}:
         failures.append("agent group members: " + ", ".join(sorted(members)))
-    details = []
-    for user in ("proxy", "logship"):
-        try:
-            pwd.getpwnam(user)
-        except KeyError:
-            if user == "proxy":
-                failures.append("no proxy user")
-            details.append(f"no {user} user yet")
-            continue
-        result = as_user(user, "cat", TOKEN)
-        if result.returncode == 0 or "Permission denied" not in result.stderr:
-            failures.append(
-                f"cat as {user} exited {result.returncode}: {result.stderr.strip()}"
-            )
-        else:
-            details.append(f"{user}: Permission denied")
+    result = as_user("nobody", "cat", TOKEN)
+    if result.returncode == 0 or "Permission denied" not in result.stderr:
+        failures.append(
+            f"cat as nobody exited {result.returncode}: {result.stderr.strip()}"
+        )
     if failures:
         return False, "; ".join(failures)
-    return True, f"{TOKEN} is root:agent 0640; " + ", ".join(details)
+    return True, f"{TOKEN} is root:agent 0640; nobody: Permission denied"
+
+
+@control("T11")
+def agent_reaches_package_registry():
+    # env -i: no proxy variables, so curl connects directly.
+    result = as_agent(*curl_argv(REGISTRY_URL))
+    if result.returncode == 0 and result.stdout == "200":
+        return True, f"{REGISTRY_URL}: HTTP 200"
+    return False, (
+        f"{REGISTRY_URL}: curl exited {result.returncode}, HTTP {result.stdout} "
+        f"{result.stderr.strip()}"
+    )
+
+
+def dpkg_status(package):
+    result = run(["/usr/bin/dpkg-query", "-W", "-f", "${Status} ${Version}", package])
+    return result.stdout if result.returncode == 0 else "not installed"
+
+
+def wardian_apt(*args):
+    return as_agent("sudo", "-n", WRAPPER, *args, timeout=600)
+
+
+@control("T12")
+def wardian_apt_installs_only_new_packages():
+    failures = []
+    # Refused before apt runs: exit 2.
+    refused = (
+        ("-y", "jq"),
+        ("--reinstall", "jq"),
+        ("-oAPT::Get::Assume-Yes=1", "jq"),
+        ("/tmp/jq.deb",),  # noqa: S108 - an argument wardian-apt must refuse
+        ("./jq.deb",),
+        ("../jq",),
+        ("jq+",),
+        ("jq-",),
+        ("jq", "--"),
+        (),
+    )
+    for args in refused:
+        result = wardian_apt(*args)
+        if result.returncode != 2:
+            failures.append(
+                f"wardian-apt {' '.join(args)} exited {result.returncode}, not 2: "
+                f"{result.stderr.strip()}"
+            )
+    # An installed jq older than the archive's: installing jq would upgrade it.
+    dpkg = [*AS_ROOT, "/usr/bin/dpkg"]
+    with tempfile.TemporaryDirectory() as tmp:
+        control_dir = Path(tmp, "pkg", "DEBIAN")
+        control_dir.mkdir(parents=True)
+        (control_dir / "control").write_text(
+            "Package: jq\nVersion: 0~wardian\nArchitecture: all\n"
+            "Maintainer: Wardian <wardian@wardian.invalid>\n"
+            "Description: an old jq, so installing jq is an upgrade\n"
+        )
+        deb = Path(tmp, "jq.deb")
+        run(
+            [
+                *AS_ROOT,
+                "/usr/bin/dpkg-deb",
+                "--build",
+                str(control_dir.parent),
+                str(deb),
+            ],
+            check=True,
+        )
+        run([*dpkg, "--purge", "jq"], check=True)
+        run([*dpkg, "--install", str(deb)], check=True)
+    result = wardian_apt("jq")
+    run([*dpkg, "--purge", "jq"], check=True)
+    if result.returncode != 3 or "recreate the sandbox" not in result.stderr:
+        failures.append(
+            f"an upgrade of jq exited {result.returncode}, not 3: {result.stderr.strip()}"
+        )
+    result = wardian_apt("jq")
+    status = dpkg_status("jq")
+    if result.returncode != 0 or not status.startswith("install ok installed"):
+        failures.append(
+            f"wardian-apt jq exited {result.returncode}, jq is {status}: "
+            f"{result.stderr.strip()[-500:]}"
+        )
+    if failures:
+        return False, "; ".join(failures)
+    return True, (
+        f"refused {len(refused)} bad argument lists and an upgrade; jq is {status}"
+    )
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", required=True, choices=("ci", "lima"))
+    parser.add_argument(
+        "--only",
+        action="append",
+        choices=sorted(THREAT_IDS),
+        help="run only this threat ID; repeat for more",
+    )
     args = parser.parse_args(argv)
 
     if os.geteuid() != 0:
@@ -419,6 +504,8 @@ def main(argv=None):
         func = TESTS.get(threat_id)
         if env not in (args.env, "both"):
             result, detail = "skip", f"runs in {env} only"
+        elif args.only and threat_id not in args.only:
+            result, detail = "skip", "not selected with --only"
         else:
             if func is None:
                 ok, detail = False, "mandatory threat ID has no test"

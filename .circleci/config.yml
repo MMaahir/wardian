@@ -164,36 +164,60 @@ jobs:
       - start-container
       - provision
 
-      # nftables.service stays active. Breaking /etc/nftables.conf and
-      # restarting the service instead would power the container off
-      # (FailureAction=poweroff) before the tests ran.
+      # Each step deletes one rule from the live ruleset, so nftables.service
+      # stays active. Breaking /etc/nftables.conf and restarting the service
+      # instead would power the container off (FailureAction=poweroff) before
+      # the tests ran. T06 must fail because a fixture answered, and the
+      # reload puts the ruleset back.
       - run:
-          name: Without the nftables ruleset, the DNS and egress tests fail
+          name: Without the private-range drop, T06 fails
           command: |
-            sudo incus exec "$CONTAINER" -- nft flush ruleset
+            handle=$(sudo incus exec "$CONTAINER" -- nft -a list chain inet wardian output \
+              | awk '/@private4/ { print $NF }')
+            [ -n "$handle" ] || { echo "no private-range drop rule"; exit 1; }
+            sudo incus exec "$CONTAINER" -- nft delete rule inet wardian output handle "$handle"
             sudo incus exec "$CONTAINER" -- \
-              /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci \
-              | tee "$CI_TEMP/no-ruleset.jsonl" || true
-            jq -e -s '[.[] | select(.id == "T02" or .id == "T06") | .result] == ["fail", "fail"]' \
-              "$CI_TEMP/no-ruleset.jsonl" \
-              || { echo "T02 and T06 must both fail without the ruleset"; exit 1; }
+              /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci --only T06 \
+              | tee "$CI_TEMP/no-private-drop.jsonl" || true
+            jq -e -s '[.[] | select(.id == "T06") | .result == "fail" and (.detail | contains("agent reached http://172.31.255.2:8080/"))] == [true]' \
+              "$CI_TEMP/no-private-drop.jsonl" \
+              || { echo "T06 must fail because agent reached the IPv4 fixture"; exit 1; }
+            sudo incus exec "$CONTAINER" -- systemctl reload nftables.service
 
       - run:
-          name: Load the ruleset again
-          command: sudo incus exec "$CONTAINER" -- systemctl reload nftables.service
-
-      - run:
-          name: Without the Squid allowlist, the blocked-domain test fails
+          name: Without the IPv6 drop, T06 fails
           command: |
-            sudo incus exec "$CONTAINER" -- sed -i \
-              -e '/^acl allowlist /d' -e '/^http_access deny !allowlist$/d' /etc/squid/squid.conf
-            sudo incus exec "$CONTAINER" -- systemctl restart squid.service
+            handle=$(sudo incus exec "$CONTAINER" -- nft -a list chain inet wardian output \
+              | awk '/nfproto ipv6/ { print $NF }')
+            [ -n "$handle" ] || { echo "no IPv6 drop rule"; exit 1; }
+            sudo incus exec "$CONTAINER" -- nft delete rule inet wardian output handle "$handle"
             sudo incus exec "$CONTAINER" -- \
-              /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci \
-              | tee "$CI_TEMP/no-allowlist.jsonl" || true
-            jq -e -s '[.[] | select(.id == "T03") | .result] == ["fail"]' \
-              "$CI_TEMP/no-allowlist.jsonl" \
-              || { echo "T03 must fail without the allowlist"; exit 1; }
+              /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci --only T06 \
+              | tee "$CI_TEMP/no-ipv6-drop.jsonl" || true
+            jq -e -s '[.[] | select(.id == "T06") | .result == "fail" and (.detail | contains("agent reached http://[fd77:6172:6469::2]:8080/"))] == [true]' \
+              "$CI_TEMP/no-ipv6-drop.jsonl" \
+              || { echo "T06 must fail because agent reached the IPv6 fixture"; exit 1; }
+            sudo incus exec "$CONTAINER" -- systemctl reload nftables.service
+
+      # Last, because it stops the container. Any change to inet wardian will
+      # do: this one accepts the T06 fixture's address.
+      - run:
+          name: wardian-apt powers off after the firewall changes
+          command: |
+            sudo incus exec "$CONTAINER" -- \
+              nft insert rule inet wardian output ip daddr 172.31.255.2 accept
+            sudo incus exec --cwd / "$CONTAINER" -- \
+              runuser -u agent -- sudo -n /usr/local/sbin/wardian-apt jq || true
+            for _ in $(seq 60); do
+              status=$(sudo incus list "$CONTAINER" --format csv --columns s)
+              if [ "$status" = STOPPED ]; then
+                echo "$CONTAINER stopped"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "$CONTAINER is still $status after 120 seconds"
+            exit 1
 
 workflows:
   ci:

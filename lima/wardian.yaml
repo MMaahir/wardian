@@ -52,7 +52,7 @@ propagateProxyEnv: false
 
 networkOpts:
   # Block the guest from the Mac's loopback services through 192.168.5.2.
-  # This does not block the Mac's LAN address; Squid and nftables handle that. (line 708)
+  # This does not block the Mac's LAN address; nftables handles that. (line 708)
   hostLoopback: false
 
 # Forward nothing. Lima appends a hidden final rule that forwards everything

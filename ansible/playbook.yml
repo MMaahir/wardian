@@ -20,10 +20,12 @@
     - project_repo
     - unwanted_packages
     - resolver
-    - squid
     - nftables
     - agent_clis
+    # After agent_clis, so the hold on claude-code applies.
+    - apt_upgrade
+    # After the upgrade and the ruleset, so the firewall snapshot is final.
+    - wardian_apt
     - claude_token
+    - sandbox_environment
     - control_tests
-    # Last: after it, the playbook's own sessions go through Squid.
-    - proxy_environment
