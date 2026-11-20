@@ -130,22 +130,27 @@ def agent_cannot_sudo():
 def agent_cannot_resolve():
     # dig asks the resolver in /etc/resolv.conf over UDP and TCP. getent goes
     # through glibc's resolver. resolvectl asks systemd-resolved, which is
-    # masked. Each must fail: dig exits 0 for any answer, NXDOMAIN included.
+    # masked. Each must fail with the exit code for a lookup that got no
+    # answer, so a probe that can't run (env exits 127) doesn't pass: dig 9
+    # (no reply from a server), getent 2 (not found), resolvectl 1.
     probes = (
-        ("dig", "-r", "+time=3", "+tries=1", BLOCKED_NAME),
-        ("dig", "-r", "+tcp", "+time=3", "+tries=1", BLOCKED_NAME),
-        ("getent", "hosts", BLOCKED_NAME),
-        ("resolvectl", "query", BLOCKED_NAME),
+        (9, "dig", "-r", "+time=3", "+tries=1", BLOCKED_NAME),
+        (9, "dig", "-r", "+tcp", "+time=3", "+tries=1", BLOCKED_NAME),
+        (2, "getent", "hosts", BLOCKED_NAME),
+        (1, "resolvectl", "query", BLOCKED_NAME),
     )
-    resolved = []
+    failures = []
     details = []
-    for probe in probes:
+    for expected, *probe in probes:
         result = as_agent(*probe)
         details.append(f"{probe[0]} exited {result.returncode}")
-        if result.returncode == 0:
-            resolved.append(" ".join(probe))
-    if resolved:
-        return False, "resolved a name: " + "; ".join(resolved)
+        if result.returncode != expected:
+            failures.append(
+                f"{' '.join(probe)} exited {result.returncode}, not {expected}: "
+                f"{result.stderr.strip()}"
+            )
+    if failures:
+        return False, "; ".join(failures)
     return True, ", ".join(details)
 
 
@@ -195,7 +200,9 @@ def nftables_drops_direct_connection():
         f"https://{PUBLIC_ADDRESS}/", "--connect-timeout", "3"
     )
     after = counter("agent_dropped")
-    if exit_code != 0 and after > before:
+    # 28 is curl's timeout. A connection that opened and then failed TLS
+    # exits with another code.
+    if exit_code == 28 and after > before:
         return (
             True,
             f"{PUBLIC_ADDRESS}: curl exited {exit_code}, agent_dropped {before} -> {after}",
