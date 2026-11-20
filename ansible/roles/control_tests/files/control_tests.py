@@ -1,8 +1,8 @@
 """Wardian control tests.
 
-Each test checks one control from the outside, the way an attacker would try
-it, and declares a threat ID, a description and the environment it runs in:
-ci (the Incus container), lima (a Lima sandbox) or both.
+Each threat ID in THREAT_IDS has a description, the environment it must run
+in (ci for the Incus container, lima for a Lima sandbox, or both) and one test.
+The test checks the control from the outside, the way an attacker would try it.
 
 The playbook installs this file root-owned. Root runs it as agent with an
 empty environment, so nothing agent can write changes the result:
@@ -10,8 +10,10 @@ empty environment, so nothing agent can write changes the result:
     runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin \
         /usr/bin/python3 -I control_tests.py --env lima
 
-It prints one JSON object per test and exits 1 if any test fails. Standard
-library only. Network probes use sockets or `curl -q`.
+It prints one JSON object per threat ID and exits 1 if any test fails. A
+threat ID that applies to the environment but has no test counts as a failure,
+so deleting a test fails the run. Standard library only. Network probes use
+sockets or `curl -q`.
 """
 
 import argparse
@@ -21,21 +23,29 @@ import pwd
 import subprocess
 import sys
 
-TESTS = []
+# Every threat ID is mandatory in its environment.
+THREAT_IDS = {
+    "T01": ("both", "agent can't use sudo"),
+}
+for _threat_id, (_env, _) in THREAT_IDS.items():
+    if _env not in ("ci", "lima", "both"):
+        raise ValueError(f"{_threat_id}: unknown environment {_env!r}")
+
+TESTS = {}
 
 
-def control(threat_id, description, env):
-    if env not in ("ci", "lima", "both"):
-        raise ValueError(f"{threat_id}: unknown environment {env!r}")
+def control(threat_id):
+    if threat_id not in THREAT_IDS:
+        raise ValueError(f"{threat_id}: not listed in THREAT_IDS")
 
     def register(func):
-        TESTS.append((threat_id, description, env, func))
+        TESTS[threat_id] = func
         return func
 
     return register
 
 
-@control("T01", "agent can't use sudo", "both")
+@control("T01")
 def agent_cannot_sudo():
     # `sudo -n true` would pass with a grant that leaves out `true`, such as
     # NOPASSWD: /usr/bin/apt. `sudo -l` lists every grant, and only a user with
@@ -54,10 +64,10 @@ def agent_cannot_sudo():
     return False, f"sudo -n -l exited {result.returncode}: {output}"
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", required=True, choices=("ci", "lima"))
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     user = pwd.getpwuid(os.geteuid()).pw_name
     if user != "agent":
@@ -65,14 +75,18 @@ def main():
         return 2
 
     failed = False
-    for threat_id, description, env, func in TESTS:
+    for threat_id, (env, description) in THREAT_IDS.items():
+        func = TESTS.get(threat_id)
         if env not in (args.env, "both"):
             result, detail = "skip", f"runs in {env} only"
         else:
-            try:
-                ok, detail = func()
-            except Exception as exc:  # noqa: BLE001 - an error is a failed test
-                ok, detail = False, f"error: {exc!r}"
+            if func is None:
+                ok, detail = False, "mandatory threat ID has no test"
+            else:
+                try:
+                    ok, detail = func()
+                except Exception as exc:  # noqa: BLE001 - an error is a failed test
+                    ok, detail = False, f"error: {exc!r}"
             result = "pass" if ok else "fail"
             failed |= not ok
         record = {

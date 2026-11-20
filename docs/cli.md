@@ -1,6 +1,6 @@
 # The wardian CLI
 
-`wardian` creates, tests and destroys a sandbox: a Lima VM built from `lima/wardian.yaml` and provisioned by `ansible/playbook.yml`. So far the playbook creates the unprivileged `agent` user and installs the control tests. The network controls, agent CLIs and git transport come in later tickets.
+`wardian` creates, tests and destroys a sandbox: a Lima VM built from `lima/wardian.yaml` and provisioned by `ansible/playbook.yml`. So far the playbook creates the unprivileged `agent` user, installs an empty nftables table with a drop-in that powers the guest off if the ruleset fails to load, and installs the control tests. The egress rules, agent CLIs and git transport come in later tickets.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ uv run wardian destroy   # delete the VM and its known-hosts file
 1. Refuses if `$LIMA_HOME/_config/default.yaml`, `override.yaml` or `base.yaml` exists (`$LIMA_HOME` defaults to `~/.lima`). Lima merges those files into every instance.
 2. Runs `limactl create --tty=false` without starting the VM, then checks Lima's merged config from `limactl list --json`. It refuses if `mounts`, `networks` or `provision` is set, if `networkOpts.hostLoopback`, `propagateProxyEnv`, `ssh.forwardAgent` or `ssh.overVsock` is anything but false, if `portForwards` is anything but the template's catch-all ignore rule, or if Lima's admin user would be named `agent`. A refused VM never boots. Remove it with `wardian destroy`.
 3. Starts the VM, reads its ed25519 host key with `limactl shell`, and writes `~/.ssh/known_hosts.d/<name>`. The entry is keyed by the host alias `<name>`, not by `127.0.0.1:60022`. Lima itself pins the key the guest presents on first boot, so the trust starts there. From this file on, every Wardian SSH connection checks the key strictly.
-4. Runs the playbook over SSH as Lima's admin user, with `StrictHostKeyChecking=yes` against that file, no reused connection, and `-F /dev/null`, so your `~/.ssh/config` doesn't apply. `ANSIBLE_CONFIG` points at `ansible/ansible.cfg`, so an `ansible.cfg` in the directory you run from is never read.
+4. Runs the playbook over SSH as Lima's admin user, with `wardian_resolver` set to Lima's resolver, 192.168.5.2. SSH uses `StrictHostKeyChecking=yes` against that file, no reused connection, and `-F /dev/null`, so your `~/.ssh/config` doesn't apply. `ANSIBLE_CONFIG` points at `ansible/ansible.cfg`, so an `ansible.cfg` in the directory you run from is never read.
 
 `test` repeats the `_config` check, then connects the same way and runs the control tests:
 
@@ -41,7 +41,7 @@ The CLI strips control characters from everything limactl, ansible-playbook, ssh
 
 ## Control tests
 
-`ansible/roles/control_tests/files/control_tests.py` is one standard-library Python file. Each test declares a threat ID, a description and where it runs: `ci`, `lima` or `both`. The playbook installs it as `root:root 0644` under `/usr/local/lib/wardian`.
+`ansible/roles/control_tests/files/control_tests.py` is one standard-library Python file. Its `THREAT_IDS` table gives each threat ID a description and where it must run: `ci`, `lima` or `both`. A threat ID that applies to the environment but has no test fails the run, so deleting a test can't make the suite pass. The playbook installs the file as `root:root 0644` under `/usr/local/lib/wardian`.
 
 | Threat ID | Runs in | Checks |
 |---|---|---|
@@ -56,3 +56,12 @@ uv run ruff format --check
 ```
 
 The unit tests run without a VM.
+
+## CI
+
+CircleCI runs `.circleci/config.yml` on an Arm machine VM. It starts an Ubuntu 26.04 Incus system container, so the firewall rules never touch the CI host, and then:
+
+1. applies the playbook twice over SSH, with `wardian_resolver` set to the Incus bridge, and fails unless the second run reports `changed=0`
+2. restarts the container and checks that nftables loaded
+3. runs the control tests with `--env ci`, through the same `runuser -u agent -- env -i … python3 -I` command as `wardian test`
+4. appends a line that isn't nft syntax to `/etc/nftables.conf`, restarts the container, and fails unless it stops within 120 seconds

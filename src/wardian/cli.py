@@ -23,6 +23,9 @@ ANSIBLE_CONFIG = REPO / "ansible" / "ansible.cfg"
 # Where the control_tests role installs the script in the guest.
 CONTROL_TESTS = "/usr/local/lib/wardian/control_tests.py"
 HOST_KEY = "/etc/ssh/ssh_host_ed25519_key.pub"
+# The guest's DNS server: Lima's host agent answers on the default gateway.
+# See "Resolver" in spike/phase-1-notes.md.
+LIMA_RESOLVER = "192.168.5.2"
 # create writes this file into the Lima instance directory. destroy deletes
 # only instances that have it, and limactl delete removes it with the rest.
 OWNER_MARKER = "wardian-sandbox"
@@ -227,6 +230,7 @@ def create(name: str) -> None:
         "ansible_port": port,
         "ansible_user": user,
         "ansible_ssh_private_key_file": identity,
+        "wardian_resolver": LIMA_RESOLVER,
         # Extra vars beat ANSIBLE_* settings from the environment, such as
         # ANSIBLE_HOST_KEY_CHECKING=false. ssh_args come first on the ssh
         # command line, and ssh keeps the first value of each option. They
