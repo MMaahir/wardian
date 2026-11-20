@@ -388,7 +388,14 @@ def unfetched_work(name: str, instance: dict, repo: Path) -> list[str]:
     changed = untracked = 0
     head = ""
     tips = {}
-    status = guest_git("status", "--porcelain=v2", "--branch", "--untracked-files=all")
+    # The flags beat any status or .gitmodules setting that would hide changes.
+    status = guest_git(
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
     for line in status:
         if line.startswith("# branch.oid "):
             head = line.removeprefix("# branch.oid ")
@@ -420,8 +427,13 @@ def unfetched_work(name: str, instance: dict, repo: Path) -> list[str]:
         else:
             tips[f"branch {ref.removeprefix('refs/heads/')}"] = oid
 
-    if tips:
-        capture(["git", "-C", str(repo), "rev-parse", "--git-dir"])
+    try:
+        if tips:
+            capture(["git", "-C", str(repo), "rev-parse", "--git-dir"])
+    except WardianError as exc:
+        # Keep the reasons already found, so they aren't hidden by this one.
+        problems.append(f"can't read the Mac repo: {exc}")
+        tips = {}
     for label, oid in tips.items():
         if not OID.fullmatch(oid):
             raise WardianError(f"unexpected object name for {label}: {oid!r}")

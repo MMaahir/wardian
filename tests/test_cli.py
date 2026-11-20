@@ -200,6 +200,22 @@ def test_unfetched_work_names_each_reason(monkeypatch, status, refs, problem):
     assert cli.unfetched_work("wardian", {}, cli.Path("/mac")) == [problem]
 
 
+def test_a_mac_dir_that_isnt_a_repo_keeps_the_other_reasons(monkeypatch):
+    fake_guest(monkeypatch, CLEAN_STATUS + "? new.py\n", MAIN_REF)
+    guest_capture = cli.capture
+
+    def fake_capture(cmd, stdin_data=None):
+        if cmd[0] == "git":
+            raise cli.WardianError("git -C exited 128: fatal: not a git repository")
+        return guest_capture(cmd)
+
+    monkeypatch.setattr(cli, "capture", fake_capture)
+    assert cli.unfetched_work("wardian", {}, cli.Path("/mac")) == [
+        "1 untracked files",
+        "can't read the Mac repo: git -C exited 128: fatal: not a git repository",
+    ]
+
+
 def test_refuses_an_object_name_that_isnt_hex(monkeypatch):
     fake_guest(monkeypatch, CLEAN_STATUS, MAIN_REF + "--all refs/heads/agent/x\n")
     with pytest.raises(cli.WardianError, match="unexpected object name"):

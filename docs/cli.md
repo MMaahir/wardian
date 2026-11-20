@@ -54,13 +54,13 @@ It prints `PASS`, `FAIL` or `SKIP` for each threat ID and exits 1 if any test fa
 
 `destroy` runs `limactl delete --force` and removes the known-hosts file. It refuses to delete a Lima instance that `create` didn't make: `create` writes a `wardian-sandbox` file into the instance directory right after `limactl create`. It also refuses, naming each reason, while the sandbox's repo holds work the Mac doesn't have:
 
-- uncommitted changes to tracked files
+- uncommitted changes to tracked files, including a submodule with changes
 - untracked files (files the repo's `.gitignore` ignores don't count)
 - a stash
 - any tag
 - a branch, or a detached `HEAD`, whose commit no ref in the Mac repo contains
 
-The Mac repo is `--repo`, or the current directory without it. `destroy` reads the sandbox's repo over SSH, so the sandbox must be running. It refuses a stopped one. Start it with `limactl start <name>`, or see [Discarding a sandbox by hand](#discarding-a-sandbox-by-hand).
+Stop the agent sessions first: anything an agent writes after the check is lost. The Mac repo is `--repo`, or the current directory without it. `destroy` reads the sandbox's repo over SSH, so the sandbox must be running. It refuses a stopped one. Start it with `limactl start <name>`, or see [Discarding a sandbox by hand](#discarding-a-sandbox-by-hand).
 
 The CLI strips control characters from everything limactl, ansible-playbook, ssh and the guest print.
 
