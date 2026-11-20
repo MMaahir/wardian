@@ -30,7 +30,13 @@ ENV = {
     "LC_ALL": "C.UTF-8",
     "DEBIAN_FRONTEND": "noninteractive",
 }
-APT_GET = ["/usr/bin/apt-get", "-o", "DPkg::Lock::Timeout=120"]
+# Pattern-Only: a name is a package name, never a regular expression that
+# apt-get would match against the archive when no package has that name.
+APT_GET = [
+    "/usr/bin/apt-get",
+    "-o", "DPkg::Lock::Timeout=120",
+    "-o", "APT::Cmd::Pattern-Only=true",
+]  # fmt: skip
 # /run is root's, so agent can't create or replace the lock file.
 LOCK = "/run/wardian-apt.lock"
 # The wardian_apt role writes both after provisioning.
@@ -43,6 +49,14 @@ CHANGES_INSTALLED = re.compile(r"Inst \S+ \[|Remv |Purg ")
 RECREATE_HINT = (
     "Fetch the agent's work and recreate the sandbox to change installed packages."
 )
+
+
+def say(message):
+    """Print to stderr. agent controls stderr, so a write that fails is ignored."""
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 def refused_names(names):
@@ -86,46 +100,46 @@ def firewall_unchanged():
 
 
 def check_firewall():
-    """Power the sandbox off unless the firewall matches the snapshot."""
+    """Power the sandbox off unless the firewall matches the snapshot.
+
+    The poweroff comes before any output, so nothing agent does to stderr
+    can stop it.
+    """
     try:
-        unchanged = firewall_unchanged()
+        if firewall_unchanged():
+            return True
+        reason = "the firewall no longer matches its snapshot"
     except Exception as exc:  # noqa: BLE001 - any failure to check is a mismatch
-        print(f"wardian-apt: can't check the firewall: {exc!r}", file=sys.stderr)
-        unchanged = False
-    if unchanged:
-        return True
-    print(
-        "wardian-apt: the firewall no longer matches its snapshot. Powering off.",
-        file=sys.stderr,
-        flush=True,
-    )
+        reason = f"can't check the firewall: {exc!r}"
     subprocess.run(
         ["/usr/bin/systemctl", "poweroff"],
         stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         check=False,
         env=ENV,
     )
+    say(f"wardian-apt: {reason}. Powering off.")
     return False
 
 
 def install(names):
     """Update, simulate, then install. Return the exit code."""
     if apt_get("update").returncode != 0:
-        print("wardian-apt: apt-get update failed", file=sys.stderr)
+        say("wardian-apt: apt-get update failed")
         return 1
     simulation = apt_get(
         "-s", "install", "--no-install-recommends", "--", *names, capture=True
     )
     if simulation.returncode != 0:
-        print(simulation.stdout + simulation.stderr, end="", file=sys.stderr)
+        say((simulation.stdout + simulation.stderr).rstrip("\n"))
         return 1
     changes = changes_to_installed(simulation.stdout)
     if changes:
-        print(
+        say(
             "wardian-apt: refusing: this would change installed packages:\n  "
             + "\n  ".join(changes)
-            + f"\n{RECREATE_HINT}",
-            file=sys.stderr,
+            + f"\n{RECREATE_HINT}"
         )
         return 3
     return apt_get(
@@ -137,18 +151,17 @@ def install(names):
 
 def main(argv):
     if os.geteuid() != 0:
-        print("wardian-apt: run it with sudo", file=sys.stderr)
+        say("wardian-apt: run it with sudo")
         return 2
     if not argv:
-        print("usage: sudo wardian-apt <package>...", file=sys.stderr)
+        say("usage: sudo wardian-apt <package>...")
         return 2
     bad = refused_names(argv)
     if bad:
-        print(
+        say(
             "wardian-apt: refusing: not a package name: "
             + ", ".join(repr(name) for name in bad)
-            + ". Pass package names only, with no options, paths or .deb files.",
-            file=sys.stderr,
+            + ". Pass package names only, with no options, paths or .deb files."
         )
         return 2
     os.chdir("/")

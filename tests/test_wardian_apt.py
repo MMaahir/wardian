@@ -88,3 +88,23 @@ def test_new_packages_change_nothing_installed(wardian_apt):
 )
 def test_upgrades_reinstalls_and_removals_are_changes(wardian_apt, line):
     assert wardian_apt.changes_to_installed(SIMULATION + line + "\n") == [line]
+
+
+class BrokenStderr:
+    def write(self, text):
+        raise BrokenPipeError
+
+    def flush(self):
+        raise BrokenPipeError
+
+
+@pytest.mark.parametrize("unchanged", [lambda: False, lambda: 1 / 0])
+def test_powers_off_even_when_stderr_is_broken(wardian_apt, monkeypatch, unchanged):
+    calls = []
+    monkeypatch.setattr(wardian_apt, "firewall_unchanged", unchanged)
+    monkeypatch.setattr(wardian_apt.sys, "stderr", BrokenStderr())
+    monkeypatch.setattr(
+        wardian_apt.subprocess, "run", lambda argv, **kwargs: calls.append(argv)
+    )
+    assert wardian_apt.check_firewall() is False
+    assert calls == [["/usr/bin/systemctl", "poweroff"]]

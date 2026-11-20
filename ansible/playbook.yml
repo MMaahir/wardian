@@ -20,10 +20,11 @@
     - project_repo
     - unwanted_packages
     - resolver
+    # Before nftables starts: an nftables package upgrade can restart the
+    # service, and its ExecStop flushes every table, Lima's included.
+    - apt_upgrade
     - nftables
     - agent_clis
-    # After agent_clis, so the hold on claude-code applies.
-    - apt_upgrade
     # After the upgrade and the ruleset, so the firewall snapshot is final.
     - wardian_apt
     - claude_token

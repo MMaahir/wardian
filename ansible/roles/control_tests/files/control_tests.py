@@ -42,6 +42,7 @@ THREAT_IDS = {
     "T10": ("both", "other users can't read the Claude token"),
     "T11": ("both", "agent downloads from a public package registry directly"),
     "T12": ("both", "wardian-apt installs new packages and refuses the rest"),
+    "T13": ("ci", "wardian-apt refuses to upgrade an installed package"),
 }
 for _threat_id, (_env, _) in THREAT_IDS.items():
     if _env not in ("ci", "lima", "both"):
@@ -440,35 +441,15 @@ def wardian_apt_installs_only_new_packages():
                 f"wardian-apt {' '.join(args)} exited {result.returncode}, not 2: "
                 f"{result.stderr.strip()}"
             )
-    # An installed jq older than the archive's: installing jq would upgrade it.
-    dpkg = [*AS_ROOT, "/usr/bin/dpkg"]
-    with tempfile.TemporaryDirectory() as tmp:
-        control_dir = Path(tmp, "pkg", "DEBIAN")
-        control_dir.mkdir(parents=True)
-        (control_dir / "control").write_text(
-            "Package: jq\nVersion: 0~wardian\nArchitecture: all\n"
-            "Maintainer: Wardian <wardian@wardian.invalid>\n"
-            "Description: an old jq, so installing jq is an upgrade\n"
-        )
-        deb = Path(tmp, "jq.deb")
-        run(
-            [
-                *AS_ROOT,
-                "/usr/bin/dpkg-deb",
-                "--build",
-                str(control_dir.parent),
-                str(deb),
-            ],
-            check=True,
-        )
-        run([*dpkg, "--purge", "jq"], check=True)
-        run([*dpkg, "--install", str(deb)], check=True)
-    result = wardian_apt("jq")
-    run([*dpkg, "--purge", "jq"], check=True)
-    if result.returncode != 3 or "recreate the sandbox" not in result.stderr:
+    # A valid name that no package has. As a regular expression it matches
+    # zsh, and apt-get would install that unless Pattern-Only is set.
+    result = wardian_apt("z.h")
+    if result.returncode == 0 or "Unable to locate package z.h" not in result.stderr:
         failures.append(
-            f"an upgrade of jq exited {result.returncode}, not 3: {result.stderr.strip()}"
+            f"wardian-apt z.h exited {result.returncode}: {result.stderr.strip()[-500:]}"
         )
+    # Installs jq, or does nothing if it is already installed. Nothing here
+    # removes a package from a sandbox in use.
     result = wardian_apt("jq")
     status = dpkg_status("jq")
     if result.returncode != 0 or not status.startswith("install ok installed"):
@@ -479,7 +460,38 @@ def wardian_apt_installs_only_new_packages():
     if failures:
         return False, "; ".join(failures)
     return True, (
-        f"refused {len(refused)} bad argument lists and an upgrade; jq is {status}"
+        f"refused {len(refused)} bad argument lists and a regular expression; "
+        f"jq is {status}"
+    )
+
+
+@control("T13")
+def wardian_apt_refuses_upgrades():
+    # CI only: it replaces jq with a fake older version, then purges it.
+    dpkg = [*AS_ROOT, "/usr/bin/dpkg"]
+    with tempfile.TemporaryDirectory() as tmp:
+        control_dir = Path(tmp, "pkg", "DEBIAN")
+        control_dir.mkdir(parents=True)
+        (control_dir / "control").write_text(
+            "Package: jq\nVersion: 0~wardian\nArchitecture: all\n"
+            "Maintainer: Wardian <wardian@wardian.invalid>\n"
+            "Description: an old jq, so installing jq is an upgrade\n"
+        )
+        deb = Path(tmp, "jq.deb")
+        build = [*AS_ROOT, "/usr/bin/dpkg-deb", "--build", str(control_dir.parent)]
+        run([*build, str(deb)], check=True)
+        run([*dpkg, "--purge", "jq"], check=True)
+        run([*dpkg, "--install", str(deb)], check=True)
+    try:
+        result = wardian_apt("jq")
+        status = dpkg_status("jq")
+    finally:
+        run([*dpkg, "--purge", "jq"], check=True)
+    if result.returncode == 3 and "recreate the sandbox" in result.stderr:
+        return True, f"an upgrade of jq was refused; jq stayed at {status}"
+    return False, (
+        f"an upgrade of jq exited {result.returncode}, not 3, jq is {status}: "
+        f"{result.stderr.strip()[-500:]}"
     )
 
 

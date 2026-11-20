@@ -6,9 +6,9 @@
 - creates `/home/agent/project`, the git repo the agents work in
 - stops and masks the background apt jobs, and removes snapd, packagekit and unattended-upgrades
 - writes a static `/etc/resolv.conf` and masks systemd-resolved
+- upgrades every installed package, before the firewall starts
 - installs the nftables ruleset, with a drop-in that powers the guest off if the ruleset fails to load
-- installs Claude Code, Codex and ripgrep, with root-owned managed settings and instructions for both CLIs
-- upgrades every installed package, with Claude Code held at its version
+- installs Claude Code, Codex and ripgrep, with root-owned managed settings and instructions for both CLIs, and holds Claude Code at its version
 - installs `wardian-apt`, its sudoers line, and a snapshot of the firewall it checks
 - creates `/etc/wardian` for the Claude token, the script that installs the token, and the login profile script that exports it
 - sets `WARDIAN_SANDBOX=1` in `/etc/environment` and `/etc/profile.d/wardian-sandbox.sh`
@@ -145,7 +145,8 @@ rm -f ~/.ssh/known_hosts.d/wardian
 | T09 | both | `agent`'s login environment has no proxy variable, in either case, and no variable starting with `AWS_`, `GOOGLE_`, `GEMINI_`, `GCLOUD_`, `CLOUDSDK_`, `ANTHROPIC_` or `OPENAI_`. One probe is `su --login` with `env` as the shell, which runs PAM and so reads `/etc/environment`. The other sources `/etc/profile` without `agent`'s dotfiles. Each must find `WARDIAN_SANDBOX=1`, so a probe that read nothing fails, and the second must also find `CLAUDE_CODE_OAUTH_TOKEN`. #27 makes the token check follow the agent mode. |
 | T10 | both | `/etc/wardian/claude-token` is `root:agent 0640`, `agent` is the only member of the `agent` group, and `cat` of the token as `nobody` gets `Permission denied`. #27 makes the test follow the agent mode. |
 | T11 | both | As `agent`, with no proxy variables, curl downloads `https://pypi.org/simple/pip/` directly and gets HTTP 200. |
-| T12 | both | As `agent`, `sudo -n wardian-apt` exits 2 for options (`-y`, `--reinstall`, `-o...`), paths, `.deb` files, names ending in `+` or `-`, a stray `--` and no names. With a fake `jq` 0~wardian installed through `dpkg`, `wardian-apt jq` would upgrade it and exits 3. With that removed, `wardian-apt jq` installs `jq`. The test leaves `jq` installed. |
+| T12 | both | As `agent`, `sudo -n wardian-apt` exits 2 for options (`-y`, `--reinstall`, `-o...`), paths, `.deb` files, names ending in `+` or `-`, a stray `--` and no names. `wardian-apt z.h`, a valid name that apt-get would otherwise treat as a regular expression matching `zsh`, fails with `Unable to locate package`. `wardian-apt jq` exits 0 and leaves `jq` installed. The test never removes a package. |
+| T13 | ci | With a fake `jq` 0~wardian installed through `dpkg`, `wardian-apt jq` would upgrade it, so it exits 3 and says to recreate the sandbox. The test then purges `jq`, which is why it runs only in CI. |
 
 T02 (no DNS), T03, T04, T05 (Squid) and T08 (no update host) were retired by #26.
 
@@ -176,12 +177,12 @@ The only resolver is `wardian_resolver`, written to a static `/etc/resolv.conf`.
 `agent` installs system packages with `sudo wardian-apt <package>...`. Its only sudoers line is `agent ALL=(root) NOPASSWD: /usr/local/sbin/wardian-apt`, in `/etc/sudoers.d/wardian-apt`, with sudo's default `env_reset`. `/usr/local/sbin/wardian-apt` is a root-owned Python script that:
 
 1. Accepts only names matching `^[a-z0-9][a-z0-9.+-]*[a-z0-9]$`: no options, paths, `.deb` files or repos. A name that ends in `+` is refused too, so `g++` comes in through `build-essential`.
-2. Runs from `/` with `umask 022`, takes an exclusive `flock` on `/run/wardian-apt.lock`, and gives every `apt-get` call a fixed environment (`PATH`, `HOME=/root`, `LC_ALL=C.UTF-8`, `DEBIAN_FRONTEND=noninteractive`) and `-o DPkg::Lock::Timeout=120`.
+2. Runs from `/` with `umask 022`, takes an exclusive `flock` on `/run/wardian-apt.lock`, and gives every `apt-get` call a fixed environment (`PATH`, `HOME=/root`, `LC_ALL=C.UTF-8`, `DEBIAN_FRONTEND=noninteractive`), `-o DPkg::Lock::Timeout=120` and `-o APT::Cmd::Pattern-Only=true`. Without Pattern-Only, apt-get treats a name no package has, such as `a.*b`, as a regular expression and installs every package it matches.
 3. Runs `apt-get update`, then `apt-get -s install --no-install-recommends -- <names>`. If the simulated transaction would remove, upgrade, downgrade or reinstall an installed package, it exits 3 and says to fetch the work and recreate the sandbox.
 4. Runs `apt-get install -y --no-remove --no-install-recommends -o Dpkg::Options::=--force-confold -- <names>`.
-5. Whatever happened after it took the lock, checks that `nft -s list table inet wardian` matches `/var/lib/wardian/inet-wardian.nft` and that `/etc/nftables.conf` matches the SHA-256 in `/var/lib/wardian/nftables.conf.sha256`. On a mismatch, or if it can't check, it runs `systemctl poweroff`.
+5. Whatever happened after it took the lock, checks that `nft -s list table inet wardian` matches `/var/lib/wardian/inet-wardian.nft` and that `/etc/nftables.conf` matches the SHA-256 in `/var/lib/wardian/nftables.conf.sha256`. On a mismatch, or if it can't check, it runs `systemctl poweroff` before it prints anything, so a broken stderr can't stop it.
 
-The sources are the ones provisioning configured: Ubuntu's archive and Anthropic's signed Claude Code repo. Background apt jobs, unattended-upgrades, snapd and packagekit are off, and provisioning runs a full upgrade with `claude-code` held, so a new package rarely needs a newer version of one already installed. When it does, `wardian-apt` refuses.
+The sources are the ones provisioning configured: Ubuntu's archive and Anthropic's signed Claude Code repo. Background apt jobs, unattended-upgrades, snapd and packagekit are off, and provisioning runs a full upgrade before the firewall starts, because an nftables package upgrade can restart the service, and its `ExecStop` flushes every table, Lima's included. Claude Code is installed after that and held. So a new package rarely needs a newer version of one already installed. When it does, `wardian-apt` refuses.
 
 ## Agent CLIs
 

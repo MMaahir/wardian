@@ -1,7 +1,8 @@
 # Brings every installed package up to date once, at provisioning. After this,
 # wardian-apt refuses any transaction that upgrades an installed package, so a
-# package the agent asks for installs alongside what's here. It runs after
-# agent_clis, so the hold on claude-code keeps it at its pinned version.
+# package the agent asks for installs alongside what's here. On the first run
+# claude-code isn't installed yet, and agent_clis installs its pinned version
+# and holds it, so a second run leaves it alone.
 - name: Upgrade every installed package
   ansible.builtin.apt:
     upgrade: full
