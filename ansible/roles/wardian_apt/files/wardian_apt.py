@@ -111,14 +111,16 @@ def main(argv):
     code = wait_for(unit, status_file)
     try:
         with open(log, errors="replace") as f:
-            say(f.read().rstrip("\n"))
+            output = f.read().rstrip("\n")
     except OSError:
-        pass
+        output = ""
+    # Removed before the caller's output, which the caller can block.
     for path in (log, status_file):
         try:
             os.unlink(path)
         except OSError:
             pass
+    say(output)
     return code
 
 

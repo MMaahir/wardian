@@ -227,6 +227,6 @@ The `mutation` job runs alongside it in its own container. It applies the playbo
 
 1. It deletes the private-range drop rule. `agent` must reach `172.31.255.2`. Then it reloads `nftables.service` to put the rule back.
 2. It deletes the IPv6 drop rule. `agent` must reach `fd77:6172:6469::2`. Then it reloads again.
-3. It inserts an accept rule into `inet wardian`. As `agent`, it starts `sudo wardian-apt jq` with its output going to a pipe nobody reads, and sends `SIGALRM` to `sudo` after 3 seconds. It fails unless the container stops within 120 seconds.
+3. It inserts an accept rule into `inet wardian`. As `agent`, it starts `sudo wardian-apt jq` with its output going to a full pipe nobody reads, and sends `SIGALRM` to `sudo` after 3 seconds. It fails if the signal can't be sent, which also means `sudo` had already exited, and unless the container stops within 120 seconds.
 
 It deletes rules from the live ruleset rather than breaking `/etc/nftables.conf`, because a ruleset that fails to load powers the container off before the tests run.
