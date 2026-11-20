@@ -6,65 +6,28 @@ agent's only sudo grant is this script:
     sudo wardian-apt <package>...
 
 It takes package names only: no options, paths, .deb files or repos. It
-installs a package only if the transaction adds packages and changes none
-that are installed. Afterwards, whether the install worked or not, it checks
-the firewall against the snapshot provisioning took, and powers the sandbox
-off if it changed.
+starts /usr/local/libexec/wardian-apt-worker as its own transient systemd
+service, waits for it, then prints the worker's log and exits with its code.
+The worker does the install and the firewall check. Nothing the caller does
+to this process or to sudo reaches the worker once it has started.
 
 Root owns this file. Standard library only. python3 -I ignores PYTHON*
 variables and the user's site directory.
 """
 
-import fcntl
-import hashlib
 import os
 import re
-import signal
+import secrets
 import subprocess
 import sys
+import time
 
 NAME = re.compile(r"[a-z0-9][a-z0-9.+-]*[a-z0-9]")
-# Every apt-get call gets this environment and nothing else.
-ENV = {
-    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
-    "HOME": "/root",
-    "LC_ALL": "C.UTF-8",
-    "DEBIAN_FRONTEND": "noninteractive",
-}
-# Pattern-Only: a name is a package name, never a regular expression that
-# apt-get would match against the archive when no package has that name.
-APT_GET = [
-    "/usr/bin/apt-get",
-    "-o", "DPkg::Lock::Timeout=120",
-    "-o", "APT::Cmd::Pattern-Only=true",
-]  # fmt: skip
-# /run is root's, so agent can't create or replace the lock file.
-LOCK = "/run/wardian-apt.lock"
-# The wardian_apt role writes both after provisioning.
-RULESET_SNAPSHOT = "/var/lib/wardian/inet-wardian.nft"
-CONFIG_HASH = "/var/lib/wardian/nftables.conf.sha256"
-NFT_CONFIG = "/etc/nftables.conf"
-# In `apt-get -s` output, an Inst line with the installed version in brackets
-# upgrades, downgrades or reinstalls a package. Remv and Purg remove one.
-CHANGES_INSTALLED = re.compile(r"Inst \S+ \[|Remv |Purg ")
-RECREATE_HINT = (
-    "Fetch the agent's work and recreate the sandbox to change installed packages."
-)
-
-
-# sudo passes these on from the caller. Each would end or stop the wrapper
-# before its firewall check, so it ignores them, and apt-get inherits that.
-# If agent kills sudo itself, the wrapper keeps running.
-CALLER_SIGNALS = (
-    signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM,
-    signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU,
-    signal.SIGUSR1, signal.SIGUSR2, signal.SIGALRM,
-)  # fmt: skip
-
-
-def ignore_caller_signals():
-    for signum in CALLER_SIGNALS:
-        signal.signal(signum, signal.SIG_IGN)
+ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C.UTF-8"}
+WORKER = "/usr/local/libexec/wardian-apt-worker"
+# /run is root's, and this directory is root's alone, so agent can't read or
+# replace a log or status file.
+RUN_DIR = "/run/wardian-apt"
 
 
 def say(message):
@@ -79,94 +42,34 @@ def refused_names(names):
     return [name for name in names if not NAME.fullmatch(name)]
 
 
-def changes_to_installed(simulation):
-    """The lines of `apt-get -s install` output that change an installed package."""
-    return [line for line in simulation.splitlines() if CHANGES_INSTALLED.match(line)]
-
-
-def apt_get(*args, capture=False):
-    return subprocess.run(
-        [*APT_GET, *args],
-        stdin=subprocess.DEVNULL,
-        capture_output=capture,
-        check=False,
-        text=True,
-        env=ENV,
-    )
-
-
-def firewall_unchanged():
-    ruleset = subprocess.run(
-        ["/usr/sbin/nft", "-s", "list", "table", "inet", "wardian"],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        check=True,
-        text=True,
-        env=ENV,
-    ).stdout
-    with open(RULESET_SNAPSHOT) as f:
-        snapshot = f.read()
-    with open(NFT_CONFIG, "rb") as f:
-        config_hash = hashlib.sha256(f.read()).hexdigest()
-    with open(CONFIG_HASH) as f:
-        expected_hash = f.read().strip()
-    return (
-        ruleset.rstrip("\n") == snapshot.rstrip("\n") and config_hash == expected_hash
-    )
-
-
-def check_firewall():
-    """Power the sandbox off unless the firewall matches the snapshot.
-
-    The poweroff comes before any output, so nothing agent does to stderr
-    can stop it.
-    """
+def read_status(path):
     try:
-        if firewall_unchanged():
-            return True
-        reason = "the firewall no longer matches its snapshot"
-    except Exception as exc:  # noqa: BLE001 - any failure to check is a mismatch
-        reason = f"can't check the firewall: {exc!r}"
-    subprocess.run(
-        ["/usr/bin/systemctl", "poweroff"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-        env=ENV,
-    )
-    say(f"wardian-apt: {reason}. Powering off.")
-    return False
+        with open(path) as f:
+            return int(f.read())
+    except FileNotFoundError:
+        return None
 
 
-def install(names):
-    """Update, simulate, then install. Return the exit code."""
-    if apt_get("update").returncode != 0:
-        say("wardian-apt: apt-get update failed")
-        return 1
-    simulation = apt_get(
-        "-s", "install", "--no-install-recommends", "--", *names, capture=True
-    )
-    if simulation.returncode != 0:
-        say((simulation.stdout + simulation.stderr).rstrip("\n"))
-        return 1
-    changes = changes_to_installed(simulation.stdout)
-    if changes:
-        say(
-            "wardian-apt: refusing: this would change installed packages:\n  "
-            + "\n  ".join(changes)
-            + f"\n{RECREATE_HINT}"
+def wait_for(unit, status_file):
+    """Wait for the worker. Return its exit code, or 1 if it left none."""
+    while True:
+        code = read_status(status_file)
+        if code is not None:
+            return code
+        active = subprocess.run(
+            ["/usr/bin/systemctl", "is-active", "--quiet", unit],
+            stdin=subprocess.DEVNULL,
+            check=False,
+            env=ENV,
         )
-        return 3
-    return apt_get(
-        "install", "-y", "--no-remove", "--no-install-recommends",
-        "-o", "Dpkg::Options::=--force-confold",
-        "--", *names,
-    ).returncode  # fmt: skip
+        if active.returncode != 0:
+            # It may have written the file just before it stopped.
+            code = read_status(status_file)
+            return 1 if code is None else code
+        time.sleep(0.5)
 
 
 def main(argv):
-    ignore_caller_signals()
     if os.geteuid() != 0:
         say("wardian-apt: run it with sudo")
         return 2
@@ -182,14 +85,41 @@ def main(argv):
         )
         return 2
     os.chdir("/")
-    os.umask(0o022)
-    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    os.umask(0o077)
+    os.makedirs(RUN_DIR, mode=0o700, exist_ok=True)
+    unit = f"wardian-apt-{secrets.token_hex(8)}"
+    log = f"{RUN_DIR}/{unit}.log"
+    status_file = f"{RUN_DIR}/{unit}.status"
+    # Without --wait, systemd-run returns once the service has started, and
+    # the service runs on whatever happens to this process.
+    started = subprocess.run(
+        [
+            "/usr/bin/systemd-run", "--quiet", "--collect", f"--unit={unit}",
+            f"--property=StandardOutput=truncate:{log}",
+            "--property=StandardError=inherit",
+            "--", "/usr/bin/python3", "-I", WORKER, status_file, *argv,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        env=ENV,
+    )  # fmt: skip
+    if started.returncode != 0:
+        say("wardian-apt: can't start the worker")
+        return 1
+    code = wait_for(unit, status_file)
     try:
-        code = install(argv)
-    finally:
-        firewall_ok = check_firewall()
-    return code if firewall_ok else 4
+        with open(log, errors="replace") as f:
+            say(f.read().rstrip("\n"))
+    except OSError:
+        pass
+    for path in (log, status_file):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return code
 
 
 if __name__ == "__main__":

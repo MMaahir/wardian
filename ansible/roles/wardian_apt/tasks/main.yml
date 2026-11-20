@@ -1,6 +1,6 @@
-# wardian-apt, agent's only sudo grant, and the firewall snapshot it checks
-# after every install. This role runs after apt_upgrade and after the
-# nftables role has loaded the ruleset, so the snapshot is the final one.
+# wardian-apt, agent's only sudo grant, its worker, and the firewall snapshot
+# the worker checks after every install. This role runs after apt_upgrade and
+# after the nftables role has loaded the ruleset, so the snapshot is final.
 
 - name: Install wardian-apt
   ansible.builtin.copy:
@@ -9,6 +9,24 @@
     owner: root
     group: root
     mode: "0755"
+
+- name: Create the worker directory
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# wardian-apt starts it as a transient systemd service, so it runs outside
+# sudo and the caller's session.
+- name: Install the wardian-apt worker
+  ansible.builtin.copy:
+    src: wardian_apt_worker.py
+    dest: /usr/local/libexec/wardian-apt-worker
+    owner: root
+    group: root
+    mode: "0644"
 
 # sudo's default env_reset applies. visudo checks the file before it lands.
 - name: Let agent run wardian-apt as root

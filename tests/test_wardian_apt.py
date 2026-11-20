@@ -1,22 +1,27 @@
 import importlib.util
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "ansible/roles/wardian_apt/files/wardian_apt.py"
-)
+FILES = Path(__file__).resolve().parents[1] / "ansible/roles/wardian_apt/files"
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, FILES / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture
 def wardian_apt():
-    spec = importlib.util.spec_from_file_location("wardian_apt", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load("wardian_apt")
+
+
+@pytest.fixture
+def worker():
+    return load("wardian_apt_worker")
 
 
 @pytest.mark.parametrize(
@@ -75,8 +80,8 @@ Conf jq (1.8.1-1 Ubuntu:26.04/resolute [arm64])
 """
 
 
-def test_new_packages_change_nothing_installed(wardian_apt):
-    assert wardian_apt.changes_to_installed(SIMULATION) == []
+def test_new_packages_change_nothing_installed(worker):
+    assert worker.changes_to_installed(SIMULATION) == []
 
 
 @pytest.mark.parametrize(
@@ -88,8 +93,8 @@ def test_new_packages_change_nothing_installed(wardian_apt):
         "Purg libfoo1 [1.0-1]",
     ],
 )
-def test_upgrades_reinstalls_and_removals_are_changes(wardian_apt, line):
-    assert wardian_apt.changes_to_installed(SIMULATION + line + "\n") == [line]
+def test_upgrades_reinstalls_and_removals_are_changes(worker, line):
+    assert worker.changes_to_installed(SIMULATION + line + "\n") == [line]
 
 
 class BrokenStderr:
@@ -101,35 +106,36 @@ class BrokenStderr:
 
 
 @pytest.mark.parametrize("unchanged", [lambda: False, lambda: 1 / 0])
-def test_powers_off_even_when_stderr_is_broken(wardian_apt, monkeypatch, unchanged):
+def test_powers_off_even_when_stderr_is_broken(worker, monkeypatch, unchanged):
     calls = []
-    monkeypatch.setattr(wardian_apt, "firewall_unchanged", unchanged)
-    monkeypatch.setattr(wardian_apt.sys, "stderr", BrokenStderr())
+    monkeypatch.setattr(worker, "firewall_unchanged", unchanged)
+    monkeypatch.setattr(worker.sys, "stderr", BrokenStderr())
     monkeypatch.setattr(
-        wardian_apt.subprocess, "run", lambda argv, **kwargs: calls.append(argv)
+        worker.subprocess, "run", lambda argv, **kwargs: calls.append(argv)
     )
-    assert wardian_apt.check_firewall() is False
+    assert worker.check_firewall() is False
     assert calls == [["/usr/bin/systemctl", "poweroff"]]
 
 
-def test_signals_from_the_caller_cant_stop_the_check():
-    # sudo passes these on to the wrapper. Without ignore_caller_signals,
-    # the first of them ends the child before it prints.
-    code = (
-        "import importlib.util, os, sys\n"
-        "spec = importlib.util.spec_from_file_location('w', sys.argv[1])\n"
-        "w = importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(w)\n"
-        "w.ignore_caller_signals()\n"
-        "for signum in w.CALLER_SIGNALS:\n"
-        "    os.kill(os.getpid(), signum)\n"
-        "print('survived')\n"
+def test_waits_for_the_status_file(wardian_apt, tmp_path, monkeypatch):
+    status = tmp_path / "status"
+    polls = []
+
+    def is_active(argv, **kwargs):
+        polls.append(argv)
+        if len(polls) == 2:
+            status.write_text("3\n")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(wardian_apt.subprocess, "run", is_active)
+    monkeypatch.setattr(wardian_apt.time, "sleep", lambda seconds: None)
+    assert wardian_apt.wait_for("wardian-apt-x", str(status)) == 3
+
+
+def test_a_worker_that_stops_without_a_status_fails(wardian_apt, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        wardian_apt.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 3),
     )
-    result = subprocess.run(
-        [sys.executable, "-I", "-c", code, str(SCRIPT)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    assert result.stdout == "survived\n", result.stderr
+    assert wardian_apt.wait_for("wardian-apt-x", str(tmp_path / "status")) == 1

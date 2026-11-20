@@ -200,14 +200,22 @@ jobs:
             sudo incus exec "$CONTAINER" -- systemctl reload nftables.service
 
       # Last, because it stops the container. Any change to inet wardian will
-      # do: this one accepts the T06 fixture's address.
+      # do: this one accepts the T06 fixture's address. agent sends SIGALRM
+      # to sudo mid-install, which sudo-rs turns into SIGKILL for the
+      # wrapper, and output nobody reads, so the worker must finish without
+      # either.
       - run:
           name: wardian-apt powers off after the firewall changes
           command: |
             sudo incus exec "$CONTAINER" -- \
               nft insert rule inet wardian output ip daddr 172.31.255.2 accept
-            sudo incus exec --cwd / "$CONTAINER" -- \
-              runuser -u agent -- sudo -n /usr/local/sbin/wardian-apt jq || true
+            sudo incus exec --cwd / "$CONTAINER" -- runuser -u agent -- sh -c '
+              mkfifo /tmp/unread
+              sleep 600 < /tmp/unread &
+              sudo -n /usr/local/sbin/wardian-apt jq > /tmp/unread 2>&1 &
+              sleep 3
+              kill -ALRM $! || echo "agent cannot signal sudo"
+              ' || true
             for _ in $(seq 60); do
               status=$(sudo incus list "$CONTAINER" --format csv --columns s)
               if [ "$status" = STOPPED ]; then
