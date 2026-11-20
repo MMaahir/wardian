@@ -1,6 +1,6 @@
 # Wardian
 
-Wardian runs AI coding agents (Claude Code and Codex) in disposable Lima VMs on a Mac. Each agent can reach one project's code and an allowlist of network destinations, and every request it makes is logged.
+Wardian runs AI coding agents (Claude Code and Codex) in disposable Lima VMs on a Mac, so a developer using T3 Code doesn't have to worry about agents reaching their other projects, sensitive files or API keys. Each agent sees one project's code and can install what that project needs from the internet, but it can't reach the Mac or the local network. It is not fool-proof containment. The spec is GitHub issue #1, and `docs/adr/` records why the design is shaped this way.
 
 ## Agent skills
 

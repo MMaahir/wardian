@@ -6,12 +6,14 @@
 - creates `/home/agent/project`, the git repo the agents work in
 - removes snapd and packagekit
 - writes a static `/etc/resolv.conf` and masks systemd-resolved
-- installs Squid with the allowlist
+- installs Squid with the allowlist (replaced by #26)
 - installs the nftables ruleset, with a drop-in that powers the guest off if the ruleset fails to load
 - installs Claude Code, Codex and ripgrep, with root-owned managed settings for both CLIs
 - creates `/etc/wardian` for the Claude token, the script that installs the token, and the login profile script that exports it
 - installs the control tests
-- points `/etc/environment` at Squid
+- points `/etc/environment` at Squid (replaced by #26)
+
+> **Being re-scoped.** Issue #1 changed on 2026-11-20 (see [ADR 0001](adr/0001-open-egress-instead-of-an-allowlist.md)). Squid and the allowlist give way to open egress with private-range drops and the `wardian-apt` wrapper (#26). `agent` gets its own SSH key, a T3 host block and one login per sandbox (#27). `wardian push` and `wardian fetch` replace the manual git setup (#28). This page describes the code on `main`, and each of those tickets updates it as it lands. Sections marked "Replaced by" describe behaviour that is going away.
 
 ## Requirements
 
@@ -23,7 +25,7 @@ Run the CLI with `uv run` from the repo, so `ansible-playbook` from `.venv` is o
 
 ## Commands
 
-Each command takes an optional sandbox name, which defaults to `wardian`. A name is 1 to 31 characters: a lowercase letter, then lowercase letters, digits or `-`. Wardian runs one sandbox at a time, because the template fixes the SSH port at 60022.
+Each command takes an optional sandbox name, which defaults to `wardian`. A name is 1 to 31 characters: a lowercase letter, then lowercase letters, digits or `-`. Only one sandbox runs at a time, because the template fixes the SSH port at 60022. You can keep stopped sandboxes, one per project, and start the one you need with `limactl start <name>`.
 
 ```sh
 uv run wardian create    # build, check, boot and provision
@@ -65,6 +67,8 @@ Stop the agent sessions first: anything an agent writes after the check is lost.
 The CLI strips control characters from everything limactl, ansible-playbook, ssh and the guest print.
 
 ## Git
+
+> Replaced by #28. `wardian push` and `wardian fetch` will do this setup and the fetch for you, connect only to the sandbox whatever your git config says, and print each branch's tip commit and the changed files Mac tools run on their own.
 
 The sandbox holds one repo, `/home/agent/project`, owned by `agent`. Code moves in and out only by git over SSH. Git connects as Lima's admin user, and `sudo` runs `git-receive-pack` and `git-upload-pack` as `agent`. The admin user never runs git in the repo: `agent` can write its config and hooks, and a hook would run as whoever runs git, and the admin user has sudo.
 
@@ -134,18 +138,20 @@ rm -f ~/.ssh/known_hosts.d/wardian
 
 | Threat ID | Runs in | Checks |
 |---|---|---|
-| T01 | both | `agent` can't use sudo: `sudo -n -l` fails and says `agent` may not run sudo. Any grant, even for one command, fails the test. |
-| T02 | both | `agent` can't resolve a name: `dig` over UDP and TCP, `getent hosts` and `resolvectl query` all fail. |
-| T03 | both | Squid answers 403 to a CONNECT for `example.com`, which isn't on the allowlist. |
-| T04 | both | A CONNECT through Squid to `api.anthropic.com` gets 200, and an HTTP reply comes back through the tunnel. |
-| T05 | both | Squid answers 403 to a CONNECT for private, loopback, link-local and metadata addresses, IPv4 and IPv6. |
-| T06 | both | A direct connection from `agent` to `1.1.1.1:443` fails, and the `agent_dropped` counter goes up. |
+| T01 | both | Changes in #26 to pass only when the grant is exactly `wardian-apt`. `agent` can't use sudo: `sudo -n -l` fails and says `agent` may not run sudo. Any grant, even for one command, fails the test. |
+| T02 | both | Retired by #26. `agent` can't resolve a name: `dig` over UDP and TCP, `getent hosts` and `resolvectl query` all fail. |
+| T03 | both | Retired by #26. Squid answers 403 to a CONNECT for `example.com`, which isn't on the allowlist. |
+| T04 | both | Retired by #26. A CONNECT through Squid to `api.anthropic.com` gets 200, and an HTTP reply comes back through the tunnel. |
+| T05 | both | Retired by #26. Squid answers 403 to a CONNECT for private, loopback, link-local and metadata addresses, IPv4 and IPv6. |
+| T06 | both | Changes in #26 to private IPv4 and non-loopback IPv6 drops for every user. A direct connection from `agent` to `1.1.1.1:443` fails, and the `agent_dropped` counter goes up. |
 | T07 | both | `find -writable` as `agent` finds nothing in `/opt/codex`, `/etc/claude-code`, `/etc/codex` or `/etc/wardian`, and none of `/usr/bin/claude`, `/usr/local/bin/codex`, the two managed config files, the token, the install script, the login profile script, `/etc/environment` or their directories is writable. Every path must exist. |
-| T08 | both | Squid answers 403 to a CONNECT for each host the CLIs could update from: `downloads.claude.ai`, `storage.googleapis.com`, `registry.npmjs.org` and GitHub's release hosts. |
-| T09 | both | `agent`'s login environment has no variable starting with `AWS_`, `GOOGLE_`, `GEMINI_`, `GCLOUD_`, `CLOUDSDK_`, `ANTHROPIC_` or `OPENAI_`. One probe is `su --login` with `env` as the shell, which runs PAM and so reads `/etc/environment`. The other sources `/etc/profile` without `agent`'s dotfiles. Each must find a variable it expects (`HTTPS_PROXY`, `CLAUDE_CODE_OAUTH_TOKEN`), so a probe that read nothing fails. |
-| T10 | both | `/etc/wardian/claude-token` is `root:agent 0640`, `agent` is the only member of the `agent` group, and `cat` of the token as `proxy` (Squid's user) gets `Permission denied`. Once #12 adds `logship`, the test runs the same `cat` as `logship`. |
+| T08 | both | Retired by #26. Squid answers 403 to a CONNECT for each host the CLIs could update from: `downloads.claude.ai`, `storage.googleapis.com`, `registry.npmjs.org` and GitHub's release hosts. |
+| T09 | both | `agent`'s login environment has no variable starting with `AWS_`, `GOOGLE_`, `GEMINI_`, `GCLOUD_`, `CLOUDSDK_`, `ANTHROPIC_` or `OPENAI_`. One probe is `su --login` with `env` as the shell, which runs PAM and so reads `/etc/environment`. The other sources `/etc/profile` without `agent`'s dotfiles. Each must find a variable it expects (`HTTPS_PROXY`, `CLAUDE_CODE_OAUTH_TOKEN`), so a probe that read nothing fails. #26 and #27 change the sentinel to `WARDIAN_SANDBOX=1` and make the token check follow the agent mode. |
+| T10 | both | `/etc/wardian/claude-token` is `root:agent 0640`, `agent` is the only member of the `agent` group, and `cat` of the token as `proxy` (Squid's user) gets `Permission denied`. #12 was closed, so `logship` won't exist. #26 moves the probe off `proxy`, and #27 makes the test follow the agent mode. |
 
 ## Egress
+
+> Replaced by #26. `agent` will reach public IPv4 hosts directly with DNS, and nftables will drop every private, link-local and metadata IPv4 address and all non-loopback IPv6 for every user. Squid and the proxy block in `/etc/environment` go away.
 
 `agent` reaches the internet only through Squid on `127.0.0.1:3128`, which allows CONNECT to port 443 for `api.anthropic.com`, `chatgpt.com` and `auth.openai.com`, the list from the spike's phase 2. Squid denies other names before it looks them up, and denies allowlisted names that resolve to a private address.
 
@@ -166,7 +172,7 @@ A block in `/etc/environment` sets `http_proxy`, `https_proxy` and their upperca
 
 ## Agent CLIs
 
-Root owns both CLIs and their config, and neither can update itself.
+Root owns both CLIs and their config, and neither can update itself. Once #26 opens egress, `agent` could install its own copy in its home, so "updates off" becomes a provisioning choice, not a control, and T08 is retired.
 
 - Claude Code 2.1.311-1 comes from Anthropic's signed apt repo, stable channel, and is held with `dpkg --set-selections`. The repo's signing key, fingerprint `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE`, is kept in the repo at `ansible/roles/agent_clis/files/claude-code.asc`.
 - Codex 0.169.0 is the full `codex-package-aarch64-unknown-linux-musl.tar.gz`, checked against GitHub's published SHA-256 and unpacked into `/opt/codex/0.169.0`. `/usr/local/bin/codex` links to `bin/codex` there. The single `codex` binary isn't enough: Codex in T3 needs `codex-code-mode-host`.
@@ -202,4 +208,4 @@ CircleCI runs `.circleci/config.yml` on Arm machine VMs. The `incus` job starts 
 The `mutation` job runs alongside it in its own container. It applies the playbook once, removes one control at a time, runs the control tests, and fails unless the tests for that control fail:
 
 1. `nft flush ruleset` removes the firewall. T02 (DNS) and T06 (direct egress) must fail. The job flushes the live ruleset rather than breaking `/etc/nftables.conf`, because a ruleset that fails to load powers the container off before the tests run. It then reloads `nftables.service` to put the ruleset back.
-2. Deleting the `allowlist` ACL and its `http_access deny` line from `/etc/squid/squid.conf`, then restarting Squid, removes the allowlist. T03 (a name off the allowlist) must fail.
+2. (Replaced by #26, which removes the private-range drop and then the IPv6 drop.) Deleting the `allowlist` ACL and its `http_access deny` line from `/etc/squid/squid.conf`, then restarting Squid, removes the allowlist. T03 (a name off the allowlist) must fail.
