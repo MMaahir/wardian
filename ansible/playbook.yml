@@ -16,5 +16,8 @@
         fail_msg: "Pass wardian_resolver, the resolver's IPv4 address, as an extra var."
   roles:
     - agent_user
+    - unwanted_packages
+    - resolver
+    - squid
     - nftables
     - control_tests

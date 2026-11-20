@@ -267,16 +267,15 @@ def test(name: str) -> None:
         raise WardianError(f"sandbox {name} is not running")
 
     address, port, user, identity = connection(instance)
-    # Root runs the root-owned script as agent with an empty environment, so
-    # nothing in agent's home or environment can change the result.
+    # Root runs the root-owned script, which reads the firewall's counters and
+    # runs every probe as agent with an empty environment, so nothing in
+    # agent's home or environment can change the result.
     cmd = [
         "ssh", *ssh_options(name),
         "-o", f"IdentityFile={identity}",
         "-p", str(port),
         f"{user}@{address}",
-        "sudo", "-n", "runuser", "-u", "agent", "--",
-        "env", "-i", "HOME=/home/agent", "PATH=/usr/bin:/bin",
-        "/usr/bin/python3", "-I", CONTROL_TESTS, "--env", "lima",
+        "sudo", "-n", "/usr/bin/python3", "-I", CONTROL_TESTS, "--env", "lima",
     ]  # fmt: skip
     try:
         result = subprocess.run(

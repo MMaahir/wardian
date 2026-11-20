@@ -1,0 +1,70 @@
+#!/usr/sbin/nft -f
+# Wardian's firewall. Outbound traffic is dropped unless a rule below accepts
+# it. The rules come from the spike's phase 2 ruleset (spike/phase-2-notes.md).
+#
+# This file replaces only table inet wardian, never the whole ruleset. Lima
+# keeps its own "ip nat" table in the guest, and `flush ruleset` would remove it.
+
+define resolver4 = {{ wardian_resolver }}
+define squid_port = 3128
+
+table inet wardian
+delete table inet wardian
+
+table inet wardian {
+	set private4 {
+		type ipv4_addr; flags interval
+		elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+			     169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16,
+			     198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 }
+	}
+	set private6 {
+		type ipv6_addr; flags interval
+		elements = { ::/127, ::ffff:0:0/96, 64:ff9b::/96, fc00::/7, fe80::/10, ff00::/8 }
+	}
+
+	# Named, so a control test can read them.
+	counter dropped { }
+	counter agent_dropped { }
+	counter proxy_private_dropped { }
+
+	chain output {
+		type filter hook output priority filter; policy drop;
+
+		# 1. Replies and related traffic.
+		ct state established,related accept
+
+		# 2. The agent reaches Squid and its own non-DNS loopback ports, nothing else.
+		oif "lo" meta skuid "agent" tcp dport $squid_port accept
+		oif "lo" meta skuid "agent" meta l4proto { tcp, udp } th dport != 53 accept
+		meta skuid "agent" counter name "agent_dropped" jump drop_logged
+
+		# 3. Squid reaches the resolver on 53, then public addresses on 443 only.
+		meta skuid "proxy" ip daddr $resolver4 meta l4proto { tcp, udp } th dport 53 accept
+		meta skuid "proxy" ip daddr @private4 counter name "proxy_private_dropped" jump drop_logged
+		meta skuid "proxy" ip6 daddr @private6 counter name "proxy_private_dropped" jump drop_logged
+		meta skuid "proxy" tcp dport 443 accept
+
+		# DHCP lease renewals. Lima's resolver and the Incus bridge are also the
+		# DHCP server. The first lease comes over a packet socket, which this
+		# chain never sees.
+		meta skuid "systemd-network" ip daddr $resolver4 udp sport 68 udp dport 67 accept
+
+		# 4. Root and apt reach the resolver, then public addresses on 80 and
+		# 443 for provisioning. No private ranges, so not the Mac.
+		meta skuid { "root", "_apt" } ip daddr $resolver4 meta l4proto { tcp, udp } th dport 53 accept
+		meta skuid { "root", "_apt" } ip daddr @private4 jump drop_logged
+		meta skuid { "root", "_apt" } ip6 daddr @private6 jump drop_logged
+		meta skuid { "root", "_apt" } tcp dport { 80, 443 } accept
+
+		# 5. Everything else.
+		jump drop_logged
+	}
+
+	# The log rule is rate-limited, so a flood can't fill the journal. The
+	# drop rule has no limit, so every packet is counted and dropped.
+	chain drop_logged {
+		limit rate 10/second burst 20 packets log prefix "wardian-drop: " level info flags skuid
+		counter name "dropped" drop
+	}
+}

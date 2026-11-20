@@ -1,6 +1,15 @@
 # The wardian CLI
 
-`wardian` creates, tests and destroys a sandbox: a Lima VM built from `lima/wardian.yaml` and provisioned by `ansible/playbook.yml`. So far the playbook creates the unprivileged `agent` user, installs an empty nftables table with a drop-in that powers the guest off if the ruleset fails to load, and installs the control tests. The egress rules, agent CLIs and git transport come in later tickets.
+`wardian` creates, tests and destroys a sandbox: a Lima VM built from `lima/wardian.yaml` and provisioned by `ansible/playbook.yml`. So far the playbook:
+
+- creates the unprivileged `agent` user
+- removes snapd and packagekit
+- writes a static `/etc/resolv.conf` and masks systemd-resolved
+- installs Squid with the allowlist
+- installs the nftables ruleset, with a drop-in that powers the guest off if the ruleset fails to load
+- installs the control tests
+
+The agent CLIs and git transport come in later tickets.
 
 ## Requirements
 
@@ -26,12 +35,13 @@ uv run wardian destroy   # delete the VM and its known-hosts file
 3. Starts the VM, reads its ed25519 host key with `limactl shell`, and writes `~/.ssh/known_hosts.d/<name>`. The entry is keyed by the host alias `<name>`, not by `127.0.0.1:60022`. Lima itself pins the key the guest presents on first boot, so the trust starts there. From this file on, every Wardian SSH connection checks the key strictly.
 4. Runs the playbook over SSH as Lima's admin user, with `wardian_resolver` set to Lima's resolver, 192.168.5.2. SSH uses `StrictHostKeyChecking=yes` against that file, no reused connection, and `-F /dev/null`, so your `~/.ssh/config` doesn't apply. `ANSIBLE_CONFIG` points at `ansible/ansible.cfg`, so an `ansible.cfg` in the directory you run from is never read.
 
-`test` repeats the `_config` check, then connects the same way and runs the control tests:
+`test` repeats the `_config` check, then connects the same way and runs the control tests as root:
 
 ```sh
-sudo -n runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin \
-  /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env lima
+sudo -n /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env lima
 ```
+
+Root only reads the firewall's counters. The script runs every probe as `agent` with an empty environment, through `runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin`.
 
 It prints `PASS`, `FAIL` or `SKIP` for each threat ID and exits 1 if any test fails or none passes.
 
@@ -46,6 +56,28 @@ The CLI strips control characters from everything limactl, ansible-playbook, ssh
 | Threat ID | Runs in | Checks |
 |---|---|---|
 | T01 | both | `agent` can't use sudo: `sudo -n -l` fails and says `agent` may not run sudo. Any grant, even for one command, fails the test. |
+| T02 | both | `agent` can't resolve a name: `dig` over UDP and TCP, `getent hosts` and `resolvectl query` all fail. |
+| T03 | both | Squid answers 403 to a CONNECT for `example.com`, which isn't on the allowlist. |
+| T04 | both | A CONNECT through Squid to `api.anthropic.com` gets 200, and an HTTP reply comes back through the tunnel. |
+| T05 | both | Squid answers 403 to a CONNECT for private, loopback, link-local and metadata addresses, IPv4 and IPv6. |
+| T06 | both | A direct connection from `agent` to `1.1.1.1:443` fails, and the `agent_dropped` counter goes up. |
+
+## Egress
+
+`agent` reaches the internet only through Squid on `127.0.0.1:3128`, which allows CONNECT to port 443 for `api.anthropic.com`, `chatgpt.com` and `auth.openai.com`, the list from the spike's phase 2. Squid denies other names before it looks them up, and denies allowlisted names that resolve to a private address.
+
+The nftables ruleset in `/etc/nftables.conf` drops outbound traffic for every user unless a rule accepts it. In order:
+
+1. Established and related traffic.
+2. `agent` to Squid's port and to non-DNS loopback ports.
+3. Squid's user to the resolver on port 53, and to public addresses on port 443. Private ranges are dropped.
+4. `systemd-network` to the resolver for DHCP renewals.
+5. Root and `_apt` to the resolver on port 53, and to public addresses on ports 80 and 443. Private ranges are dropped.
+6. Everything else goes through one rate-limited log rule with the prefix `wardian-drop:`, then a counter and drop rule with no limit.
+
+The named counters `agent_dropped`, `proxy_private_dropped` and `dropped` show which rule dropped a packet: `sudo nft list counters table inet wardian`.
+
+The only resolver is `wardian_resolver`, written to a static `/etc/resolv.conf`. systemd-resolved and its sockets are masked.
 
 ## Development
 
@@ -63,5 +95,5 @@ CircleCI runs `.circleci/config.yml` on an Arm machine VM. It starts an Ubuntu 2
 
 1. applies the playbook twice over SSH, with `wardian_resolver` set to the Incus bridge, and fails unless the second run reports `changed=0`
 2. restarts the container and checks that nftables loaded
-3. runs the control tests with `--env ci`, through the same `runuser -u agent -- env -i … python3 -I` command as `wardian test`
+3. runs the control tests with `--env ci`, through the same `python3 -I` command as `wardian test`
 4. appends a line that isn't nft syntax to `/etc/nftables.conf`, restarts the container, and fails unless it stops within 120 seconds

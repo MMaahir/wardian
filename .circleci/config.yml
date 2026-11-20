@@ -113,7 +113,6 @@ jobs:
           name: Run the control tests
           command: |
             sudo incus exec "$CONTAINER" -- \
-              runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin \
               /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci
 
       - run:
