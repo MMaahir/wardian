@@ -1,0 +1,41 @@
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# A typo fails the playbook here, not the next boot.
+- name: Install the ruleset
+  ansible.builtin.copy:
+    src: nftables.conf
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: nft -c -f %s
+  notify: Reload nftables
+
+- name: Create the nftables.service drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/nftables.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Power off when the ruleset fails to load
+  ansible.builtin.copy:
+    src: 50-wardian.conf
+    dest: /etc/systemd/system/nftables.service.d/50-wardian.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: nftables_dropin
+
+- name: Enable and start nftables
+  ansible.builtin.systemd_service:
+    name: nftables.service
+    enabled: true
+    state: started
+    daemon_reload: "{{ nftables_dropin is changed }}"

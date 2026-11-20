@@ -1,9 +1,20 @@
 # Provisions a fresh Wardian sandbox. Apply it only to a new VM: a sandbox
 # that has been used is destroyed and recreated, never re-provisioned.
+#
+# wardian_resolver is the DNS server the sandbox uses: Lima's host agent in a
+# VM, the Incus bridge in CI. The wardian CLI and the CI workflow pass it.
 - name: Provision a Wardian sandbox
   hosts: all
   become: true
   gather_facts: false
+  pre_tasks:
+    - name: Check the resolver address
+      ansible.builtin.assert:
+        that:
+          - wardian_resolver is defined
+          - wardian_resolver is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
+        fail_msg: "Pass wardian_resolver, the resolver's IPv4 address, as an extra var."
   roles:
     - agent_user
+    - nftables
     - control_tests
