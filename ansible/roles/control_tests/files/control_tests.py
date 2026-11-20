@@ -80,6 +80,8 @@ PROTECTED_PATHS = (
     "/usr/bin/claude",
     "/usr/local/bin",
     "/usr/local/bin/codex",
+    "/etc/claude-code/managed-settings.json",
+    "/etc/codex/managed_config.toml",
     "/usr/local/sbin",
     "/usr/local/sbin/wardian-install-claude-token",
     "/etc/profile.d",
@@ -98,11 +100,12 @@ UPDATE_HOSTS = (
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
 )
-# AWS, Google, Cloud SDK, Anthropic and OpenAI API variables.
+# AWS, Google (including Gemini), Cloud SDK, Anthropic and OpenAI API variables.
 # CLAUDE_CODE_OAUTH_TOKEN is allowed: it is the sandbox's own Claude token.
 FORBIDDEN_ENV_PREFIXES = (
     "AWS_",
     "GOOGLE_",
+    "GEMINI_",
     "GCLOUD_",
     "CLOUDSDK_",
     "ANTHROPIC_",
@@ -284,9 +287,8 @@ def nftables_drops_direct_connection():
 
 @control("T07")
 def agent_cannot_write_clis_or_token():
-    missing = [
-        p for p in (*PROTECTED_TREES, *PROTECTED_PATHS) if not os.path.lexists(p)
-    ]
+    # exists follows the codex symlink, so a dangling link counts as missing.
+    missing = [p for p in (*PROTECTED_TREES, *PROTECTED_PATHS) if not os.path.exists(p)]
     if missing:
         return False, "missing: " + ", ".join(missing)
     # -writable asks access(2), so the probe writes nothing. find follows the
