@@ -45,6 +45,25 @@ def control(threat_id):
     return register
 
 
+@control("T01")
+def agent_cannot_sudo():
+    # `sudo -n true` would pass with a grant that leaves out `true`, such as
+    # NOPASSWD: /usr/bin/apt. `sudo -l` lists every grant, and only a user with
+    # none gets "may not run sudo".
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "-l"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+    output = (result.stdout + result.stderr).strip()
+    if result.returncode != 0 and "may not run sudo" in output:
+        return True, output
+    return False, f"sudo -n -l exited {result.returncode}: {output}"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", required=True, choices=("ci", "lima"))
