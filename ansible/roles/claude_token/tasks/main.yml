@@ -1,0 +1,28 @@
+# Where the Claude token goes, and how it reaches agent's environment. The
+# playbook never sees the token: `wardian create` pipes it from the Mac's
+# Keychain into the install script after the playbook runs.
+
+# Only root and the agent group can list it, and only root can write it.
+- name: Create the token directory
+  ansible.builtin.file:
+    path: /etc/wardian
+    state: directory
+    owner: root
+    group: agent
+    mode: "0750"
+
+- name: Install the token install script
+  ansible.builtin.copy:
+    src: wardian-install-claude-token
+    dest: /usr/local/sbin/wardian-install-claude-token
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the login profile script that exports the token
+  ansible.builtin.copy:
+    src: wardian-claude-token.sh
+    dest: /etc/profile.d/wardian-claude-token.sh
+    owner: root
+    group: root
+    mode: "0644"

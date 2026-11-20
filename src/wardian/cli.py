@@ -26,6 +26,15 @@ HOST_KEY = "/etc/ssh/ssh_host_ed25519_key.pub"
 # The guest's DNS server: Lima's host agent answers on the default gateway.
 # See "Resolver" in spike/phase-1-notes.md.
 LIMA_RESOLVER = "192.168.5.2"
+# The claude_token role installs this script. It reads the token on stdin.
+INSTALL_SCRIPT = "/usr/local/sbin/wardian-install-claude-token"
+# The login Keychain item that holds the token from `claude setup-token`.
+KEYCHAIN_SERVICE = "wardian-claude-token"
+STORE_TOKEN_HINT = (
+    "Store the token from `claude setup-token` with: security "
+    f'add-generic-password -U -a "$USER" -s {KEYCHAIN_SERVICE} -w'
+)
+CLAUDE_TOKEN = re.compile(r"sk-ant-oat[A-Za-z0-9_-]+")
 # create writes this file into the Lima instance directory. destroy deletes
 # only instances that have it, and limactl delete removes it with the rest.
 OWNER_MARKER = "wardian-sandbox"
@@ -87,11 +96,15 @@ def run(cmd: list[str], env: dict[str, str] | None = None) -> None:
         raise WardianError(f"{shlex.join(cmd[:2])} exited {proc.returncode}")
 
 
-def capture(cmd: list[str]) -> str:
-    """Run cmd and return its stdout, uncleaned. Callers clean what they print."""
+def capture(cmd: list[str], stdin_data: bytes | None = None) -> str:
+    """Run cmd and return its stdout, uncleaned. Callers clean what they print.
+
+    stdin_data, if given, goes to cmd's stdin through a pipe.
+    """
+    stdin = {"stdin": subprocess.DEVNULL} if stdin_data is None else {}
     try:
         result = subprocess.run(
-            cmd, stdin=subprocess.DEVNULL, capture_output=True, check=False
+            cmd, input=stdin_data, capture_output=True, check=False, **stdin
         )
     except OSError as exc:
         raise WardianError(f"can't run {cmd[0]}: {exc}") from exc
@@ -194,6 +207,24 @@ def ssh_options(name: str) -> list[str]:
     ]  # fmt: skip
 
 
+def read_claude_token() -> bytes:
+    """Read the Claude token from the login Keychain, never from a file."""
+    try:
+        output = capture(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]
+        )
+    except WardianError as exc:
+        raise WardianError(f"{exc}. {STORE_TOKEN_HINT}") from exc
+    token = output.removesuffix("\n")
+    if not CLAUDE_TOKEN.fullmatch(token):
+        # Never print the item: it may be a different secret.
+        raise WardianError(
+            f"the Keychain item {KEYCHAIN_SERVICE} isn't a Claude token "
+            f"(sk-ant-oat...). {STORE_TOKEN_HINT}"
+        )
+    return token.encode()
+
+
 def connection(instance: dict) -> tuple[str, int, str, str]:
     """Return the address, port, admin user and identity file for SSH."""
     return (
@@ -204,8 +235,21 @@ def connection(instance: dict) -> tuple[str, int, str, str]:
     )
 
 
+def admin_ssh(name: str, instance: dict) -> list[str]:
+    """The ssh command line, up to the remote command, as Lima's admin user."""
+    address, port, user, identity = connection(instance)
+    return [
+        "ssh", *ssh_options(name),
+        "-o", f"IdentityFile={identity}",
+        "-p", str(port),
+        f"{user}@{address}",
+    ]  # fmt: skip
+
+
 def create(name: str) -> None:
     check_lima_global_config()
+    # Read first, so a missing token stops create before it builds a VM.
+    token = read_claude_token()
     run(["limactl", "create", "--tty=false", f"--name={name}", str(TEMPLATE)])
 
     instance = find_instance(name)
@@ -257,6 +301,9 @@ def create(name: str) -> None:
         # Use this repo's config, never an ansible.cfg in the working directory.
         env={**os.environ, "ANSIBLE_CONFIG": str(ANSIBLE_CONFIG)},
     )
+    # Over ssh's stdin, so the token is never in a file or argument on the Mac.
+    capture([*admin_ssh(name, instance), "sudo", "-n", INSTALL_SCRIPT], token)
+    print(f"Installed the Claude token in {name}.")
     print(f"Sandbox {name} is ready.")
 
 
@@ -266,15 +313,11 @@ def test(name: str) -> None:
     if instance is None or instance.get("status") != "Running":
         raise WardianError(f"sandbox {name} is not running")
 
-    address, port, user, identity = connection(instance)
     # Root runs the root-owned script, which reads the firewall's counters and
     # runs every probe as agent with an empty environment, so nothing in
     # agent's home or environment can change the result.
     cmd = [
-        "ssh", *ssh_options(name),
-        "-o", f"IdentityFile={identity}",
-        "-p", str(port),
-        f"{user}@{address}",
+        *admin_ssh(name, instance),
         "sudo", "-n", "/usr/bin/python3", "-I", CONTROL_TESTS, "--env", "lima",
     ]  # fmt: skip
     try:

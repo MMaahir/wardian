@@ -1,0 +1,135 @@
+# Claude Code and Codex, pinned to the versions the spike tested
+# (spike/phase-2-notes.md, "CLIs and T3 server"). Root owns every file, and
+# neither CLI can update itself: no update host is on Squid's allowlist.
+
+# Anthropic's release signing key, fingerprint
+# 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE, kept in the repo so provisioning
+# never trusts a key it downloads.
+- name: Install Anthropic's apt signing key
+  ansible.builtin.copy:
+    src: claude-code.asc
+    dest: /etc/apt/keyrings/claude-code.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Add the Claude Code apt repo
+  ansible.builtin.copy:
+    content: |
+      deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main
+    dest: /etc/apt/sources.list.d/claude-code.list
+    owner: root
+    group: root
+    mode: "0644"
+  register: claude_code_repo
+
+# The earlier roles' cache_valid_time would skip this within the hour.
+- name: Read the new repo's package list
+  ansible.builtin.apt:
+    update_cache: true
+  when: claude_code_repo is changed
+
+- name: Install Claude Code and ripgrep
+  ansible.builtin.apt:
+    name:
+      - claude-code=2.1.311-1
+      - ripgrep
+    state: present
+
+- name: Hold Claude Code at its version
+  ansible.builtin.dpkg_selections:
+    name: claude-code
+    selection: hold
+
+# The full package, not the single binary: Codex in T3 needs
+# codex-code-mode-host (spike/phase-1-notes.md, "CLIs"). The cache directory
+# is root's, so agent can't swap the archive between download and unpack.
+- name: Create the download directory
+  ansible.builtin.file:
+    path: /var/cache/wardian
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download Codex
+  ansible.builtin.get_url:
+    url: https://github.com/openai/codex/releases/download/rust-v0.169.0/codex-package-aarch64-unknown-linux-musl.tar.gz
+    # GitHub's published digest for the asset.
+    checksum: sha256:c8d0b4ab2a97c595b70b10412d36d0d5464dcef1e1d3246b073d48017cdf5a4f
+    dest: /var/cache/wardian/codex-package-0.169.0.tar.gz
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create the Codex directory
+  ansible.builtin.file:
+    path: /opt/codex/0.169.0
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The archive's files belong to "runner" and none is group or world
+# writable. --no-same-owner makes root own them.
+- name: Unpack Codex
+  ansible.builtin.unarchive:
+    src: /var/cache/wardian/codex-package-0.169.0.tar.gz
+    dest: /opt/codex/0.169.0
+    remote_src: true
+    extra_opts: [--no-same-owner]
+    creates: /opt/codex/0.169.0/bin/codex
+
+- name: Put codex on PATH
+  ansible.builtin.file:
+    src: /opt/codex/0.169.0/bin/codex
+    dest: /usr/local/bin/codex
+    state: link
+    owner: root
+    group: root
+
+- name: Create the managed config directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/claude-code
+    - /etc/codex
+
+# Claude Code applies these over agent's own ~/.claude/settings.json.
+- name: Install Claude Code's managed settings
+  ansible.builtin.copy:
+    content: |
+      {
+        "env": {
+          "DISABLE_AUTOUPDATER": "1",
+          "DISABLE_UPDATES": "1",
+          "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+        },
+        "disableClaudeAiConnectors": true
+      }
+    dest: /etc/claude-code/managed-settings.json
+    owner: root
+    group: root
+    mode: "0644"
+
+# Codex 0.169.0 applies managed_config.toml over ~/.codex/config.toml and -c
+# flags. Phase 1 tested that for feature flags (spike/phase-1-notes.md,
+# "Codex system config file").
+- name: Install Codex's managed config
+  ansible.builtin.copy:
+    content: |
+      # Wardian: root-owned. Codex 0.169.0 applies this file over ~/.codex/config.toml and -c flags.
+      check_for_update_on_startup = false
+
+      [features]
+      # ChatGPT apps (connectors).
+      apps = false
+    dest: /etc/codex/managed_config.toml
+    owner: root
+    group: root
+    mode: "0644"
