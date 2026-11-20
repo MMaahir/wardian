@@ -23,6 +23,9 @@ ANSIBLE_CONFIG = REPO / "ansible" / "ansible.cfg"
 # Where the control_tests role installs the script in the guest.
 CONTROL_TESTS = "/usr/local/lib/wardian/control_tests.py"
 HOST_KEY = "/etc/ssh/ssh_host_ed25519_key.pub"
+# create writes this file into the Lima instance directory. destroy deletes
+# only instances that have it, and limactl delete removes it with the rest.
+OWNER_MARKER = "wardian-sandbox"
 
 NAME = re.compile(r"[a-z][a-z0-9-]{0,30}")
 # C0 controls except tab and newline, DEL, and C1 controls.
@@ -205,6 +208,7 @@ def create(name: str) -> None:
     instance = find_instance(name)
     if instance is None:
         raise WardianError(f"limactl created no instance named {name}")
+    (Path(instance["dir"]) / OWNER_MARKER).touch()
     problems = config_problems(instance.get("config") or {})
     if problems:
         raise WardianError(
@@ -230,6 +234,12 @@ def create(name: str) -> None:
         "ansible_connection": "ssh",
         "ansible_host_key_checking": True,
         "ansible_ssh_args": shlex.join(ssh_options(name)),
+        # Ansible appends these after ssh_args, and -S there would still
+        # override ControlPath=none. Blank them so the environment can't.
+        "ansible_ssh_common_args": "",
+        "ansible_ssh_extra_args": "",
+        "ansible_scp_extra_args": "",
+        "ansible_sftp_extra_args": "",
     }
     run(
         [
@@ -296,7 +306,12 @@ def test(name: str) -> None:
 
 
 def destroy(name: str) -> None:
-    if find_instance(name) is not None:
+    instance = find_instance(name)
+    if instance is not None:
+        if not (Path(instance["dir"]) / OWNER_MARKER).exists():
+            raise WardianError(
+                f"refusing: Lima instance {name} wasn't made by wardian create"
+            )
         run(["limactl", "delete", "--force", name])
     path = known_hosts_file(name)
     if path.exists():

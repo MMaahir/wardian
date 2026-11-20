@@ -84,3 +84,12 @@ def test_invalid_names(name):
 
 def test_clean_strips_control_characters():
     assert cli.clean("a\x1b[31mb\x07c\rd\x9be\x7f\tf\n") == "a[31mbcde\tf\n"
+
+
+def test_destroy_refuses_instance_wardian_did_not_create(
+    tmp_path, monkeypatch, no_subprocess, capsys
+):
+    monkeypatch.setattr(cli, "find_instance", lambda name: {"dir": str(tmp_path)})
+
+    assert cli.main(["destroy"]) == 1
+    assert "wasn't made by wardian create" in capsys.readouterr().err

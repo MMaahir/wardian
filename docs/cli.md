@@ -35,7 +35,7 @@ sudo -n runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin \
 
 It prints `PASS`, `FAIL` or `SKIP` for each threat ID and exits 1 if any test fails or none passes.
 
-`destroy` runs `limactl delete --force` and removes the known-hosts file. It doesn't yet check for unfetched work.
+`destroy` runs `limactl delete --force` and removes the known-hosts file. It refuses to delete a Lima instance that `create` didn't make: `create` writes a `wardian-sandbox` file into the instance directory right after `limactl create`. It doesn't yet check for unfetched work.
 
 The CLI strips control characters from everything limactl, ansible-playbook, ssh and the guest print.
 
