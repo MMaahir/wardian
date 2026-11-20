@@ -6,6 +6,9 @@
 
 # Python
 .venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
 
 # Terraform state and plans never go in git
 *.tfstate
