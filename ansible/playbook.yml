@@ -1,0 +1,9 @@
+# Provisions a fresh Wardian sandbox. Apply it only to a new VM: a sandbox
+# that has been used is destroyed and recreated, never re-provisioned.
+- name: Provision a Wardian sandbox
+  hosts: all
+  become: true
+  gather_facts: false
+  roles:
+    - agent_user
+    - control_tests

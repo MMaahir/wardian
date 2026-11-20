@@ -1,0 +1,32 @@
+[project]
+name = "wardian"
+version = "0.1.0"
+description = "Run AI coding agents in disposable Lima VMs on a Mac."
+license = "Apache-2.0"
+requires-python = ">=3.13"
+# The CLI uses only the standard library at runtime.
+dependencies = []
+
+[project.scripts]
+wardian = "wardian.cli:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+# ansible-playbook is a program the CLI runs, not a library it imports.
+provision = ["ansible-core"]
+
+[tool.uv]
+default-groups = ["dev", "provision"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.ruff.lint]
+extend-select = ["B", "I", "S", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# subprocess is the CLI's job, and the arguments are lists, never shell strings.
+"src/wardian/cli.py" = ["S603", "S607"]
+"ansible/roles/control_tests/files/control_tests.py" = ["S603"]
+"tests/*" = ["S101"]

@@ -1,0 +1,16 @@
+# Root-owned, so agent can't change the tests that judge it.
+- name: Create the control test directory
+  ansible.builtin.file:
+    path: /usr/local/lib/wardian
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the control test script
+  ansible.builtin.copy:
+    src: control_tests.py
+    dest: /usr/local/lib/wardian/control_tests.py
+    owner: root
+    group: root
+    mode: "0644"

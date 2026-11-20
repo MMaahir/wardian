@@ -1,0 +1,22 @@
+# The unprivileged user the agents run as. useradd gives it no password, and
+# groups "" keeps it out of every group but its own, so no sudoers rule
+# (such as %sudo) matches it.
+- name: Create the agent user
+  ansible.builtin.user:
+    name: agent
+    shell: /bin/bash
+    groups: ""
+    create_home: true
+  register: agent_user
+
+# useradd gives a new user a subordinate ID range. With one, agent could run
+# rootless containers whose processes the firewall sees under other UIDs.
+# The range depends on which users came first, so match the line instead.
+- name: Remove agent's subordinate user and group IDs
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    regexp: "^(agent|{{ agent_user.uid }}):"
+    state: absent
+  loop:
+    - /etc/subuid
+    - /etc/subgid

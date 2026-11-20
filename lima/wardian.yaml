@@ -1,0 +1,88 @@
+# Wardian sandbox template. `wardian create` builds every sandbox from it.
+#
+# The VM settings come from spike/spike-phase2.yaml, the template the spike
+# verified by hand. Ansible provisions the guest after first boot.
+#
+# Hand-written with no `base`, so every setting Lima uses is in this file,
+# a builtin default listed in Lima 2.3.0's templates/default.yaml, or
+# $LIMA_HOME/_config/{default,override,base}.yaml. `wardian create` refuses to
+# run while any of those three exists, then checks the merged config before
+# the first boot.
+# Line references below point at /opt/homebrew/share/lima/templates/default.yaml.
+
+# Apple's Virtualization.framework. Required for networkOpts.hostLoopback. (line 12)
+vmType: vz
+arch: aarch64
+
+# One image, pinned by digest. The hash matches Ubuntu's SHA256SUMS for
+# release-20261016. Lima refuses to boot a download that doesn't match. (line 39)
+images:
+- location: "https://cloud-images.ubuntu.com/releases/resolute/release-20261016/ubuntu-26.04-server-cloudimg-arm64.img"
+  arch: aarch64
+  digest: "sha256:8eb876c2ccc4b6ff89e4a65d511815923b285e04503ba465809bf587f763da24"
+
+# The builtin disk default is 100GiB. (lines 43-51)
+cpus: 4
+memory: "4GiB"
+disk: "20GiB"
+
+# No folders shared from the Mac. (line 61)
+mounts: []
+
+ssh:
+  # Fixed port on the Mac's 127.0.0.1, forwarded to the guest's port 22. (line 158)
+  localPort: 60022
+  # Don't load ~/.ssh/*.pub into the guest. (line 164)
+  loadDotSSHPubKeys: false
+  # Don't forward the Mac's SSH agent into the guest. (line 170)
+  forwardAgent: false
+  # The vz default carries SSH over vsock, served by systemd-ssh-generator's
+  # units instead of Ubuntu's ssh.socket. With false, Lima uses TCP for SSH.
+  # The guest still listens on vsock port 22 until sshd-vsock.socket is
+  # masked. (line 179)
+  overVsock: false
+
+# The builtin default turns on user (rootless) containerd. (lines 207-215)
+containerd:
+  system: false
+  user: false
+
+# Don't copy the Mac's proxy variables into the guest. (line 636)
+propagateProxyEnv: false
+
+networkOpts:
+  # Block the guest from the Mac's loopback services through 192.168.5.2.
+  # This does not block the Mac's LAN address; Squid and nftables handle that. (line 708)
+  hostLoopback: false
+
+# Forward nothing. Lima appends a hidden final rule that forwards everything
+# on the guest's 127.0.0.1 (lines 584-590). Rules are checked in order and
+# the first match wins, so this catch-all runs first. guestIP 0.0.0.0 with
+# guestIPMustBeZero false matches a listener on any guest address, IPv4 or
+# IPv6, and proto any covers TCP and UDP.
+portForwards:
+- guestIP: "0.0.0.0"
+  guestIPMustBeZero: false
+  guestPortRange: [1, 65535]
+  proto: any
+  ignore: true
+
+# The admin account `limactl shell` logs in as. By default Lima copies the
+# Mac's login name, full name and UID (lines 377-391), and `agent` can read
+# them from /etc/passwd. Lima's cloud-config creates no `ubuntu` user, so
+# UID 1000 is free. The home directory keeps the builtin default,
+# /home/lima.guest.
+user:
+  name: lima
+  comment: "Lima admin"
+  uid: 1000
+
+# The builtin default copies the Mac's time zone. (lines 456-459)
+timezone: "Etc/UTC"
+
+# Copied from Lima's _images/ubuntu-26.04.yaml (lines 89-94), which this file
+# doesn't inherit because it has no `base`. It stops a 26.04 network bug from
+# stalling first boot for 120 seconds. Lima marks the key internal, so check it
+# still exists when Lima is upgraded.
+param:
+  internal_netplanOptional: "true"
