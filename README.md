@@ -12,7 +12,7 @@ Wardian puts each project in its own VM (the sandbox). The agent gets the projec
 
 This section and the next describe the design in issue #1. [Status](#status) says which parts are on `main` today.
 
-- **Your other projects.** The sandbox has no host mounts, and holds only the one repo you push into it. It can't reach services on your Mac or your LAN.
+- **Your other projects.** The sandbox has no host mounts, and holds only the one repo you push into it. The firewall blocks it from the private addresses of your Mac and your LAN, so it can't reach services listening on them.
 - **Your sensitive files.** Nothing from your home folder is shared with the VM. Code comes back only by git, as refs that don't touch your working tree. Wardian lists changed files that Mac tools run on their own, such as dotfiles, `package.json` and `Makefile`, so you see them before you merge.
 - **Your credentials.** No SSH agent forwarding, no host API keys and no cloud or forge tokens enter the sandbox. The only credential inside is the chosen agent's own login.
 
@@ -23,11 +23,14 @@ Wardian is not fool-proof containment. It aims to keep agents away from things t
 - The agent can send the project's code and its own login anywhere on the internet.
 - The agent can run anything it downloads, inside the VM.
 - T3's `html_render` pages run in the Mac app and can make your Mac send requests to its own localhost and LAN while the thread is open. Only T3 can fix this.
+- A Mac with a public IPv4 address, or a service your router forwards to it, can be reached, because the firewall blocks private, link-local and metadata IPv4 addresses and all non-loopback IPv6, not public IPv4 addresses.
 - A bug in the guest kernel, Lima or the hypervisor could reach your Mac.
 
 The full list of accepted risks is in the spec, [issue #1](https://github.com/MMaahir/wardian/issues/1).
 
 ## How it works
+
+This also describes the design in issue #1.
 
 ```text
 Mac                                    Sandbox (Lima VM)
@@ -35,13 +38,15 @@ Mac                                    Sandbox (Lima VM)
 T3 Code ──── SSH as `agent` ─────────▶ T3 server, Claude Code or Codex
 your repo ── wardian push / fetch ───▶ /home/agent/project
                                          │
-                                         ├─▶ public internet: allowed
-                                         └─▶ Mac, LAN, metadata: dropped by nftables
+                                         ├─▶ public IPv4: allowed
+                                         ├─▶ DNS and DHCP to Lima's gateway: allowed
+                                         └─▶ other private, link-local and metadata
+                                             IPv4, and non-loopback IPv6: dropped
 ```
 
 - The VM comes from Wardian's own Lima template: pinned Ubuntu image, no mounts, no port forwarding, no access to the Mac's loopback.
 - Agents run as `agent`, an unprivileged user. Their only root access is `sudo wardian-apt <packages>`, which can only install new system packages.
-- nftables drops traffic to private, link-local and metadata addresses for every user, so even root inside the VM can't reach your Mac or LAN without breaking the firewall first.
+- nftables drops traffic to private, link-local and metadata addresses for every user, apart from DNS and DHCP to Lima's gateway, so even root inside the VM can't reach those addresses without breaking the firewall first.
 - Every control has a threat ID and a test that checks it from outside. CI runs the tests on every change, and a mutation job removes controls one at a time to check their tests fail.
 
 [ADR 0001](docs/adr/0001-open-egress-instead-of-an-allowlist.md) explains why agents get the open internet rather than an allowlist.
@@ -61,14 +66,14 @@ Wardian is in development. The design changed on 2026-11-20 to give agents more 
 - A Mac with Apple silicon and Lima 2.3 (`brew install lima`)
 - [uv](https://docs.astral.sh/uv/), which installs Python 3.13 and Ansible into `.venv`
 - git 2.42 or later, for `wardian fetch`
-- For Claude: a Claude token in your login Keychain under the service name `wardian-claude-token`. Make one with `claude setup-token`, then store it with:
+- A Claude token in your login Keychain under the service name `wardian-claude-token`. `create` refuses without it, even if you plan to use Codex, until #27 adds a choice of agent. Make one with `claude setup-token`, then store it with:
 
   ```sh
   security add-generic-password -U -a "$USER" -s wardian-claude-token -w
   ```
 
   With `-w` last and no value, `security` prompts for the token, so it never lands in your shell history.
-- For Codex: a ChatGPT account. Codex logs in with a device code inside each sandbox.
+- For Codex, a ChatGPT account. Codex logs in with a device code inside each sandbox.
 - No connectors linked on either account, and no Codex Cloud environments or tasks.
 
 A sandbox uses 4 CPUs, 4 GiB of memory and 20 GiB of disk. One runs at a time.
@@ -88,12 +93,14 @@ Each command takes an optional sandbox name (default `wardian`), so you can keep
 A typical session:
 
 1. `wardian create` a sandbox for the project.
-2. Push your project's current commit into it. Until #28, this is the manual git setup in [docs/cli.md](docs/cli.md#git).
+2. Push your project's `main` into it. Until #28, this is the manual git setup in [docs/cli.md](docs/cli.md#git). Push from a repo that holds only this project: git's protocol can reveal information about other objects in the repo you push from.
 3. Connect T3 Code to the sandbox as `agent` (needs #27) and give the agent a task. Agents work on `agent/<task>` branches.
 4. Fetch the agent's branches back to your Mac, read the diff (and, from #28, the list of files Mac tools run on their own), and merge the commit you read by its SHA.
-5. `wardian destroy` the sandbox when the work is merged.
+5. When the work is merged, `uv run wardian destroy --repo /path/to/project`. `--repo` must be the project, not this clone, or the unfetched-work check reads the wrong repo and refuses.
 
 Run the agent's code and tests in the sandbox, not on your Mac, until you've reviewed it.
+
+To see connections the firewall blocked, run `limactl shell <name> sudo journalctl -k --grep wardian-drop`.
 
 [docs/cli.md](docs/cli.md) covers each command in detail, the control tests, the firewall rules and the CI jobs.
 
@@ -105,7 +112,7 @@ uv run ruff check
 uv run ruff format --check
 ```
 
-The unit tests need no VM. `WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_git.py` runs the git tests against a real sandbox and destroys it at the end.
+The unit tests need no VM. `WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_git.py` runs the git tests against a fresh, running sandbox made by `create`, and destroys it at the end. A sandbox that already holds a project can fail them.
 
 CI runs on CircleCI: the playbook is applied twice inside an Incus container on an Arm VM, the control tests run there, and a mutation job removes controls one at a time and checks their tests fail.
 

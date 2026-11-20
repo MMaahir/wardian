@@ -188,7 +188,7 @@ uv run ruff check
 uv run ruff format --check
 ```
 
-The unit tests run without a VM. `tests/test_lima_git.py` needs a running sandbox made by `create`. It pushes into the sandbox's repo, checks each case `destroy` refuses, fetches, and then destroys the sandbox:
+The unit tests run without a VM. `tests/test_lima_git.py` needs a fresh, running sandbox made by `create`, because its first test pushes an unrelated history to `main`. It pushes into the sandbox's repo, checks each case `destroy` refuses, fetches, and then destroys the sandbox:
 
 ```sh
 WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_git.py
