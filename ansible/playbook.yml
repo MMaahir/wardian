@@ -16,6 +16,8 @@
         fail_msg: "Pass wardian_resolver, the resolver's IPv4 address, as an extra var."
   roles:
     - agent_user
+    # Early, so a create that fails later still leaves a repo destroy can check.
+    - project_repo
     - unwanted_packages
     - resolver
     - squid

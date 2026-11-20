@@ -134,3 +134,89 @@ def test_create_stops_before_building_a_vm_without_a_token(
 
     assert cli.main(["create"]) == 1
     assert "security add-generic-password" in capsys.readouterr().err
+
+
+def test_destroy_refuses_a_sandbox_that_isnt_running(
+    tmp_path, monkeypatch, no_subprocess, capsys
+):
+    (tmp_path / cli.OWNER_MARKER).touch()
+    instance = {"dir": str(tmp_path), "status": "Stopped"}
+    monkeypatch.setattr(cli, "find_instance", lambda name: instance)
+
+    assert cli.main(["destroy"]) == 1
+    err = capsys.readouterr().err
+    assert "is Stopped" in err
+    assert "Discarding a sandbox by hand" in err
+
+
+OID_A = "a" * 40
+OID_B = "b" * 40
+CLEAN_STATUS = f"# branch.oid {OID_A}\n# branch.head main\n"
+MAIN_REF = f"{OID_A} refs/heads/main\n"
+
+
+def fake_guest(monkeypatch, status, refs, on_mac=(OID_A,)):
+    """Make the sandbox's repo answer with status and refs."""
+
+    def fake_capture(cmd, stdin_data=None):
+        if cmd[0] == "git":  # the Mac repo check
+            return ".git\n"
+        subcommand = cmd[-1].split(f"git -C {cli.GUEST_REPO} ")[1].split()[0]
+        return {"status": status, "for-each-ref": refs}[subcommand]
+
+    monkeypatch.setattr(cli, "admin_ssh", lambda name, instance: ["ssh"])
+    monkeypatch.setattr(cli, "capture", fake_capture)
+    monkeypatch.setattr(cli, "on_mac", lambda repo, oid: oid in on_mac)
+
+
+def test_fully_fetched_repo_has_no_unfetched_work(monkeypatch):
+    fake_guest(monkeypatch, CLEAN_STATUS, MAIN_REF)
+    assert cli.unfetched_work("wardian", {}, cli.Path("/mac")) == []
+
+
+def test_empty_repo_has_no_unfetched_work(monkeypatch):
+    status = "# branch.oid (initial)\n# branch.head main\n"
+    fake_guest(monkeypatch, status, "", on_mac=())
+    assert cli.unfetched_work("wardian", {}, cli.Path("/mac")) == []
+
+
+@pytest.mark.parametrize(
+    ("status", "refs", "problem"),
+    [
+        (CLEAN_STATUS + "1 .M N... 100644 100644 100644 x y a.py\n", MAIN_REF,
+         "uncommitted changes in 1 files"),
+        (CLEAN_STATUS + "? new.py\n? b.py\n", MAIN_REF, "2 untracked files"),
+        (CLEAN_STATUS, MAIN_REF + f"{OID_A} refs/stash\n", "a stash"),
+        (CLEAN_STATUS, MAIN_REF + f"{OID_A} refs/tags/v1\n", "tag v1"),
+        (CLEAN_STATUS, MAIN_REF + f"{OID_B} refs/heads/agent/x\n",
+         f"branch agent/x at {OID_B[:12]} isn't in /mac"),
+        (f"# branch.oid {OID_B}\n# branch.head (detached)\n", MAIN_REF,
+         f"detached HEAD at {OID_B[:12]} isn't in /mac"),
+        (CLEAN_STATUS, MAIN_REF + f"{OID_A} refs/tags/\x1b[31mred\n", "tag [31mred"),
+    ],
+)  # fmt: skip
+def test_unfetched_work_names_each_reason(monkeypatch, status, refs, problem):
+    fake_guest(monkeypatch, status, refs)
+    assert cli.unfetched_work("wardian", {}, cli.Path("/mac")) == [problem]
+
+
+def test_a_mac_dir_that_isnt_a_repo_keeps_the_other_reasons(monkeypatch):
+    fake_guest(monkeypatch, CLEAN_STATUS + "? new.py\n", MAIN_REF)
+    guest_capture = cli.capture
+
+    def fake_capture(cmd, stdin_data=None):
+        if cmd[0] == "git":
+            raise cli.WardianError("git -C exited 128: fatal: not a git repository")
+        return guest_capture(cmd)
+
+    monkeypatch.setattr(cli, "capture", fake_capture)
+    assert cli.unfetched_work("wardian", {}, cli.Path("/mac")) == [
+        "1 untracked files",
+        "can't read the Mac repo: git -C exited 128: fatal: not a git repository",
+    ]
+
+
+def test_refuses_an_object_name_that_isnt_hex(monkeypatch):
+    fake_guest(monkeypatch, CLEAN_STATUS, MAIN_REF + "--all refs/heads/agent/x\n")
+    with pytest.raises(cli.WardianError, match="unexpected object name"):
+        cli.unfetched_work("wardian", {}, cli.Path("/mac"))

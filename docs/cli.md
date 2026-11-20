@@ -3,6 +3,7 @@
 `wardian` creates, tests and destroys a sandbox: a Lima VM built from `lima/wardian.yaml` and provisioned by `ansible/playbook.yml`. So far the playbook:
 
 - creates the unprivileged `agent` user
+- creates `/home/agent/project`, the git repo the agents work in
 - removes snapd and packagekit
 - writes a static `/etc/resolv.conf` and masks systemd-resolved
 - installs Squid with the allowlist
@@ -11,8 +12,6 @@
 - creates `/etc/wardian` for the Claude token, the script that installs the token, and the login profile script that exports it
 - installs the control tests
 - points `/etc/environment` at Squid
-
-Git transport comes in a later ticket.
 
 ## Requirements
 
@@ -29,14 +28,14 @@ Each command takes an optional sandbox name, which defaults to `wardian`. A name
 ```sh
 uv run wardian create    # build, check, boot and provision
 uv run wardian test      # run the control tests and report each threat ID
-uv run wardian destroy   # delete the VM and its known-hosts file
+uv run wardian destroy --repo ~/Developer/myproject   # check for unfetched work, then delete
 ```
 
 `create`:
 
 1. Refuses if `$LIMA_HOME/_config/default.yaml`, `override.yaml` or `base.yaml` exists (`$LIMA_HOME` defaults to `~/.lima`). Lima merges those files into every instance.
 2. Reads the Claude token from the Keychain with `security find-generic-password -s wardian-claude-token -w`, and refuses unless it starts with `sk-ant-oat`. The token stays in the CLI's memory and is never written to a file on the Mac. A missing token stops `create` before it builds a VM.
-3. Runs `limactl create --tty=false` without starting the VM, then checks Lima's merged config from `limactl list --json`. It refuses if `mounts`, `networks` or `provision` is set, if `networkOpts.hostLoopback`, `propagateProxyEnv`, `ssh.forwardAgent` or `ssh.overVsock` is anything but false, if `portForwards` is anything but the template's catch-all ignore rule, or if Lima's admin user would be named `agent`. A refused VM never boots. Remove it with `wardian destroy`.
+3. Runs `limactl create --tty=false` without starting the VM, then checks Lima's merged config from `limactl list --json`. It refuses if `mounts`, `networks` or `provision` is set, if `networkOpts.hostLoopback`, `propagateProxyEnv`, `ssh.forwardAgent` or `ssh.overVsock` is anything but false, if `portForwards` is anything but the template's catch-all ignore rule, or if Lima's admin user would be named `agent`. A refused VM never boots, and `create` deletes it.
 4. Starts the VM, reads its ed25519 host key with `limactl shell`, and writes `~/.ssh/known_hosts.d/<name>`. The entry is keyed by the host alias `<name>`, not by `127.0.0.1:60022`. Lima itself pins the key the guest presents on first boot, so the trust starts there. From this file on, every Wardian SSH connection checks the key strictly.
 5. Runs the playbook over SSH as Lima's admin user, with `wardian_resolver` set to Lima's resolver, 192.168.5.2. SSH uses `StrictHostKeyChecking=yes` against that file, no reused connection, and `-F /dev/null`, so your `~/.ssh/config` doesn't apply. `ANSIBLE_CONFIG` points at `ansible/ansible.cfg`, so an `ansible.cfg` in the directory you run from is never read.
 6. Pipes the token over the same SSH connection settings into `sudo -n /usr/local/sbin/wardian-install-claude-token`. The script writes it to a temporary file in `/etc/wardian`, sets it to `root:agent 0640`, and renames it to `/etc/wardian/claude-token`, so a failed copy never replaces a good token.
@@ -53,9 +52,81 @@ Root only reads the firewall's counters. The script runs every probe as `agent` 
 
 It prints `PASS`, `FAIL` or `SKIP` for each threat ID and exits 1 if any test fails or none passes.
 
-`destroy` runs `limactl delete --force` and removes the known-hosts file. It refuses to delete a Lima instance that `create` didn't make: `create` writes a `wardian-sandbox` file into the instance directory right after `limactl create`. It doesn't yet check for unfetched work.
+`destroy` runs `limactl delete --force` and removes the known-hosts file. It refuses to delete a Lima instance that `create` didn't make: `create` writes a `wardian-sandbox` file into the instance directory right after `limactl create`. It also refuses, naming each reason, while the sandbox's repo holds work the Mac doesn't have:
+
+- uncommitted changes to tracked files, including a submodule with changes
+- untracked files (files the repo's `.gitignore` ignores don't count)
+- a stash
+- any tag
+- a branch, or a detached `HEAD`, whose commit no ref in the Mac repo contains
+
+Stop the agent sessions first: anything an agent writes after the check is lost. The Mac repo is `--repo`, or the current directory without it. `destroy` reads the sandbox's repo over SSH, so the sandbox must be running. It refuses a stopped one. Start it with `limactl start <name>`, or see [Discarding a sandbox by hand](#discarding-a-sandbox-by-hand).
 
 The CLI strips control characters from everything limactl, ansible-playbook, ssh and the guest print.
+
+## Git
+
+The sandbox holds one repo, `/home/agent/project`, owned by `agent`. Code moves in and out only by git over SSH. Git connects as Lima's admin user, and `sudo` runs `git-receive-pack` and `git-upload-pack` as `agent`. The admin user never runs git in the repo: `agent` can write its config and hooks, and a hook would run as whoever runs git, and the admin user has sudo.
+
+Set up once on the Mac. Add this to `~/.ssh/config`, above any `Host *` block, since ssh keeps the first value it reads for each option:
+
+```
+Host wardian
+    HostName 127.0.0.1
+    Port 60022
+    User lima
+    IdentityFile ~/.lima/_config/user
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    HostKeyAlias wardian
+    UserKnownHostsFile ~/.ssh/known_hosts.d/wardian
+    GlobalKnownHostsFile /dev/null
+    ForwardAgent no
+    ControlMaster no
+    ControlPath none
+```
+
+These are the settings `wardian` itself uses. For a sandbox with another name, change `wardian` in `Host`, `HostKeyAlias` and the known-hosts file name. If you set `$LIMA_HOME`, the key is in `$LIMA_HOME/_config/user`.
+
+Then, in the Mac repo:
+
+```sh
+git remote add --no-tags sandbox wardian:/home/agent/project
+git config remote.sandbox.fetch '+refs/heads/agent/*:refs/remotes/sandbox/agent/*'
+git config remote.sandbox.receivepack 'cd / && sudo -n -H -u agent git-receive-pack'
+git config remote.sandbox.uploadpack 'cd / && sudo -n -H -u agent git-upload-pack'
+```
+
+`cd /` is there because `sudo` keeps the admin's home as the working directory, and `agent` can't enter it.
+
+Push the base commit with `git push sandbox main`. The repo's `HEAD` is `main`, and `receive.denyCurrentBranch` is `updateInstead`, so the push updates the checked-out files. If `agent` has uncommitted changes there, git refuses the push with `Working directory has unstaged changes`, and nothing changes. A push to a branch that isn't checked out moves only the branch.
+
+The agents commit on `agent/<task>` branches. Fetch them into `sandbox/agent/*`:
+
+```sh
+( set -o pipefail
+  git -c fetch.fsckObjects=true fetch --no-tags --no-recurse-submodules \
+    sandbox '+refs/heads/agent/*:refs/remotes/sandbox/agent/*' 2>&1 \
+    | LC_ALL=C tr -cd '\011\012\040-\176' )
+```
+
+- The refspec names `agent/*` only, so no other branch comes back.
+- `--no-tags` fetches no tags, and `--no-recurse-submodules` fetches no submodules.
+- `fetch.fsckObjects` checks every object received and rejects a malformed one. It's set on the command line because it beats `transfer.fsckObjects` and any `fetch.fsckObjects` in your own config.
+- `tr` keeps only tab, newline and printable ASCII, because the spike showed escape sequences in git's `remote:` lines reach the terminal. `pipefail` keeps git's exit status.
+
+Read the diff, for example `git diff main sandbox/agent/<task>`, and merge the commit you read by its SHA, not by the branch name. Run the agent's code in the sandbox, not on the Mac.
+
+## Discarding a sandbox by hand
+
+`destroy` can't check a sandbox it can't reach, such as one the firewall-failure poweroff stopped, and it refuses. To delete one anyway:
+
+```sh
+limactl delete --force wardian
+rm -f ~/.ssh/known_hosts.d/wardian
+```
+
+**Any work in the sandbox that you haven't fetched is lost.** If the VM still boots, `limactl start wardian` and a fetch first.
 
 ## Control tests
 
@@ -111,7 +182,13 @@ uv run ruff check
 uv run ruff format --check
 ```
 
-The unit tests run without a VM.
+The unit tests run without a VM. `tests/test_lima_git.py` needs a running sandbox made by `create`. It pushes into the sandbox's repo, checks each case `destroy` refuses, fetches, and then destroys the sandbox:
+
+```sh
+WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_git.py
+```
+
+Without `WARDIAN_LIMA_SANDBOX`, those tests are skipped.
 
 ## CI
 

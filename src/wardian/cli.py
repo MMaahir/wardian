@@ -38,6 +38,15 @@ CLAUDE_TOKEN = re.compile(r"sk-ant-oat[A-Za-z0-9_-]+")
 # create writes this file into the Lima instance directory. destroy deletes
 # only instances that have it, and limactl delete removes it with the rest.
 OWNER_MARKER = "wardian-sandbox"
+# The repo the project_repo role creates. agent owns it, and runs every git
+# command in it, so no other user runs git under config agent can write.
+GUEST_REPO = "/home/agent/project"
+# sudo keeps the admin's home as the working directory, and agent can't enter it.
+AS_AGENT = "cd / && sudo -n -H -u agent"
+OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+DISCARD_HINT = (
+    "To discard it anyway, see 'Discarding a sandbox by hand' in docs/cli.md."
+)
 
 NAME = re.compile(r"[a-z][a-z0-9-]{0,30}")
 # C0 controls except tab and newline, DEL, and C1 controls.
@@ -258,10 +267,10 @@ def create(name: str) -> None:
     (Path(instance["dir"]) / OWNER_MARKER).touch()
     problems = config_problems(instance.get("config") or {})
     if problems:
+        # It never booted, so it holds no work.
+        run(["limactl", "delete", "--force", name])
         raise WardianError(
-            f"refusing to start {name}: "
-            + "; ".join(problems)
-            + f". Run `wardian destroy {name}` to remove it."
+            f"refused to start {name}, and deleted it: " + "; ".join(problems)
         )
 
     run(["limactl", "start", "--tty=false", name])
@@ -351,12 +360,113 @@ def test(name: str) -> None:
     print(f"All control tests passed on {name}.")
 
 
-def destroy(name: str) -> None:
+def on_mac(repo: Path, oid: str) -> bool:
+    """Whether a ref in the Mac repo contains the commit oid."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "for-each-ref", "--count=1", "--contains", oid],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise WardianError(f"can't run git: {exc}") from exc
+    # git exits non-zero for a commit the repo doesn't have.
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def unfetched_work(name: str, instance: dict, repo: Path) -> list[str]:
+    """List the work in the sandbox's repo that deleting it would lose."""
+    ssh = admin_ssh(name, instance)
+
+    def guest_git(*args: str) -> list[str]:
+        # ssh hands the command to the admin's shell, so quote the arguments.
+        command = f"{AS_AGENT} git -C {GUEST_REPO} {shlex.join(args)}"
+        return capture([*ssh, command]).splitlines()
+
+    problems = []
+    changed = untracked = 0
+    head = ""
+    tips = {}
+    # The flags beat any status or .gitmodules setting that would hide changes.
+    status = guest_git(
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
+    for line in status:
+        if line.startswith("# branch.oid "):
+            head = line.removeprefix("# branch.oid ")
+        elif line == "# branch.head (detached)":
+            # Commits on a detached HEAD are on no branch.
+            tips["detached HEAD"] = head
+        elif line.startswith(("1 ", "2 ", "u ")):
+            changed += 1
+        elif line.startswith("? "):
+            untracked += 1
+    if changed:
+        problems.append(f"uncommitted changes in {changed} files")
+    if untracked:
+        problems.append(f"{untracked} untracked files")
+
+    refs = guest_git(
+        "for-each-ref",
+        "--format=%(objectname) %(refname)",
+        "refs/heads",
+        "refs/tags",
+        "refs/stash",
+    )
+    for line in refs:
+        oid, _, ref = line.partition(" ")
+        if ref == "refs/stash":
+            problems.append("a stash")
+        elif ref.startswith("refs/tags/"):
+            problems.append(f"tag {ref.removeprefix('refs/tags/')}")
+        else:
+            tips[f"branch {ref.removeprefix('refs/heads/')}"] = oid
+
+    try:
+        if tips:
+            capture(["git", "-C", str(repo), "rev-parse", "--git-dir"])
+    except WardianError as exc:
+        # Keep the reasons already found, so they aren't hidden by this one.
+        problems.append(f"can't read the Mac repo: {exc}")
+        tips = {}
+    for label, oid in tips.items():
+        if not OID.fullmatch(oid):
+            raise WardianError(f"unexpected object name for {label}: {oid!r}")
+        if not on_mac(repo, oid):
+            problems.append(f"{label} at {oid[:12]} isn't in {repo}")
+    return [clean(problem) for problem in problems]
+
+
+def destroy(name: str, repo: Path) -> None:
     instance = find_instance(name)
     if instance is not None:
         if not (Path(instance["dir"]) / OWNER_MARKER).exists():
             raise WardianError(
                 f"refusing: Lima instance {name} wasn't made by wardian create"
+            )
+        status = instance.get("status")
+        if status != "Running":
+            raise WardianError(
+                clean(
+                    f"refusing: {name} is {status}, so wardian can't check it "
+                    f"for unfetched work. Start it with `limactl start {name}`. "
+                    + DISCARD_HINT
+                )
+            )
+        try:
+            problems = unfetched_work(name, instance, repo)
+        except WardianError as exc:
+            raise WardianError(
+                f"can't check {name} for unfetched work: {exc}. {DISCARD_HINT}"
+            ) from exc
+        if problems:
+            raise WardianError(
+                f"refusing: {name} has work that isn't fetched: " + "; ".join(problems)
             )
         run(["limactl", "delete", "--force", name])
     path = known_hosts_file(name)
@@ -372,14 +482,23 @@ def main(argv: list[str] | None = None) -> int:
     for func, help_text in (
         (create, "build a sandbox from the template and provision it"),
         (test, "run the control tests in a sandbox"),
-        (destroy, "delete a sandbox and its known-hosts file"),
+        (destroy, "delete a fully fetched sandbox and its known-hosts file"),
     ):
         command = commands.add_parser(func.__name__, help=help_text)
         command.add_argument("name", nargs="?", default="wardian", type=sandbox_name)
         command.set_defaults(func=func)
-    args = parser.parse_args(argv)
+        if func is destroy:
+            command.add_argument(
+                "--repo",
+                type=Path,
+                default=Path.cwd(),
+                help="the Mac repo the sandbox's branches must be in "
+                "(default: the current directory)",
+            )
+    kwargs = vars(parser.parse_args(argv))
+    func = kwargs.pop("func")
     try:
-        args.func(args.name)
+        func(**kwargs)
     except WardianError as exc:
         print(f"wardian: {exc}", file=sys.stderr)
         return 1
