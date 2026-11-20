@@ -1,0 +1,35 @@
+# The one repo the agents work in. The Mac pushes a base commit into it and
+# fetches the agents' agent/* branches back, both over SSH. See "Git" in
+# docs/cli.md.
+- name: Install git
+  ansible.builtin.apt:
+    name: git
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# agent runs every git command here, so root never runs git in a repo whose
+# config agent can write. updateInstead lets a push to the checked-out branch
+# update the worktree, and refuses the push if the worktree has uncommitted
+# changes. `creates` skips the task once the repo exists.
+- name: Create the project repo as agent
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/runuser
+      - -u
+      - agent
+      - --
+      - /usr/bin/env
+      - -i
+      - HOME=/home/agent
+      - PATH=/usr/bin:/bin
+      - /bin/sh
+      - -ec
+      - |
+        git init --quiet --initial-branch=main /home/agent/project
+        cd /home/agent/project
+        git config receive.denyCurrentBranch updateInstead
+        git config user.name "Wardian agent"
+        git config user.email agent@wardian.invalid
+    chdir: /
+    creates: /home/agent/project
