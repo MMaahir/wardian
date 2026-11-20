@@ -103,7 +103,6 @@ PROTECTED_PATHS = (
     "/usr/local/sbin/wardian-install-claude-token",
     WRAPPER,
     "/etc/sudoers.d",
-    "/etc/sudoers.d/wardian-apt",
     "/etc/profile.d",
     "/etc/profile.d/wardian-claude-token.sh",
     "/etc/profile.d/wardian-sandbox.sh",
