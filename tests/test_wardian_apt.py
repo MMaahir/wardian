@@ -1,4 +1,6 @@
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -108,3 +110,26 @@ def test_powers_off_even_when_stderr_is_broken(wardian_apt, monkeypatch, unchang
     )
     assert wardian_apt.check_firewall() is False
     assert calls == [["/usr/bin/systemctl", "poweroff"]]
+
+
+def test_signals_from_the_caller_cant_stop_the_check():
+    # sudo passes these on to the wrapper. Without ignore_caller_signals,
+    # the first of them ends the child before it prints.
+    code = (
+        "import importlib.util, os, sys\n"
+        "spec = importlib.util.spec_from_file_location('w', sys.argv[1])\n"
+        "w = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(w)\n"
+        "w.ignore_caller_signals()\n"
+        "for signum in w.CALLER_SIGNALS:\n"
+        "    os.kill(os.getpid(), signum)\n"
+        "print('survived')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code, str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.stdout == "survived\n", result.stderr

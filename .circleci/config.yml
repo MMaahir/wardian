@@ -167,7 +167,7 @@ jobs:
       # Each step deletes one rule from the live ruleset, so nftables.service
       # stays active. Breaking /etc/nftables.conf and restarting the service
       # instead would power the container off (FailureAction=poweroff) before
-      # the tests ran. T06 must fail because a fixture answered, and the
+      # the tests ran. T06 must fail because the fixture answered both users, and the
       # reload puts the ruleset back.
       - run:
           name: Without the private-range drop, T06 fails
@@ -179,9 +179,9 @@ jobs:
             sudo incus exec "$CONTAINER" -- \
               /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci --only T06 \
               | tee "$CI_TEMP/no-private-drop.jsonl" || true
-            jq -e -s '[.[] | select(.id == "T06") | .result == "fail" and (.detail | contains("agent reached http://172.31.255.2:8080/"))] == [true]' \
+            jq -e -s '[.[] | select(.id == "T06") | .result == "fail" and (.detail | contains("agent reached http://172.31.255.2:8080/") and contains("agent reached http://wardian-fixture.test:8080/") and contains("root reached http://172.31.255.2:8080/") and contains("root reached http://wardian-fixture.test:8080/"))] == [true]' \
               "$CI_TEMP/no-private-drop.jsonl" \
-              || { echo "T06 must fail because agent reached the IPv4 fixture"; exit 1; }
+              || { echo "T06 must fail because agent and root reached the IPv4 fixture, by address and by name"; exit 1; }
             sudo incus exec "$CONTAINER" -- systemctl reload nftables.service
 
       - run:
@@ -194,9 +194,9 @@ jobs:
             sudo incus exec "$CONTAINER" -- \
               /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci --only T06 \
               | tee "$CI_TEMP/no-ipv6-drop.jsonl" || true
-            jq -e -s '[.[] | select(.id == "T06") | .result == "fail" and (.detail | contains("agent reached http://[fd77:6172:6469::2]:8080/"))] == [true]' \
+            jq -e -s '[.[] | select(.id == "T06") | .result == "fail" and (.detail | contains("agent reached http://[fd77:6172:6469::2]:8080/") and contains("root reached http://[fd77:6172:6469::2]:8080/"))] == [true]' \
               "$CI_TEMP/no-ipv6-drop.jsonl" \
-              || { echo "T06 must fail because agent reached the IPv6 fixture"; exit 1; }
+              || { echo "T06 must fail because agent and root reached the IPv6 fixture"; exit 1; }
             sudo incus exec "$CONTAINER" -- systemctl reload nftables.service
 
       # Last, because it stops the container. Any change to inet wardian will

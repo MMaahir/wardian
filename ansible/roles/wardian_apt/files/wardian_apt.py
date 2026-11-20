@@ -19,6 +19,7 @@ import fcntl
 import hashlib
 import os
 import re
+import signal
 import subprocess
 import sys
 
@@ -49,6 +50,21 @@ CHANGES_INSTALLED = re.compile(r"Inst \S+ \[|Remv |Purg ")
 RECREATE_HINT = (
     "Fetch the agent's work and recreate the sandbox to change installed packages."
 )
+
+
+# sudo passes these on from the caller. Each would end or stop the wrapper
+# before its firewall check, so it ignores them, and apt-get inherits that.
+# If agent kills sudo itself, the wrapper keeps running.
+CALLER_SIGNALS = (
+    signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM,
+    signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU,
+    signal.SIGUSR1, signal.SIGUSR2, signal.SIGALRM,
+)  # fmt: skip
+
+
+def ignore_caller_signals():
+    for signum in CALLER_SIGNALS:
+        signal.signal(signum, signal.SIG_IGN)
 
 
 def say(message):
@@ -150,6 +166,7 @@ def install(names):
 
 
 def main(argv):
+    ignore_caller_signals()
     if os.geteuid() != 0:
         say("wardian-apt: run it with sudo")
         return 2

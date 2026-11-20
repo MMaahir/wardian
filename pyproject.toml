@@ -34,3 +34,5 @@ extend-select = ["B", "I", "S", "UP"]
 "tests/*" = ["S101"]
 # The Lima tests run git on the Mac, as the docs tell the user to.
 "tests/test_lima_git.py" = ["S603", "S607"]
+# Runs the wrapper module in a child Python to send it signals.
+"tests/test_wardian_apt.py" = ["S603"]

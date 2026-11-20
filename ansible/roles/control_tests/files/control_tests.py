@@ -448,8 +448,15 @@ def wardian_apt_installs_only_new_packages():
         failures.append(
             f"wardian-apt z.h exited {result.returncode}: {result.stderr.strip()[-500:]}"
         )
-    # Installs jq, or does nothing if it is already installed. Nothing here
-    # removes a package from a sandbox in use.
+    # Installs jq. If jq is already installed, the test leaves it alone: once
+    # the archive has a newer jq, wardian-apt rightly refuses the upgrade.
+    # Nothing here removes a package from a sandbox in use.
+    status = dpkg_status("jq")
+    if status.startswith("install ok installed"):
+        return not failures, "; ".join(failures) or (
+            f"refused {len(refused)} bad argument lists and a regular expression; "
+            f"jq was already installed: {status}"
+        )
     result = wardian_apt("jq")
     status = dpkg_status("jq")
     if result.returncode != 0 or not status.startswith("install ok installed"):
