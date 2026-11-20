@@ -1,9 +1,9 @@
 version: 2.1
 
-jobs:
-  incus:
-    # A full arm64 VM with sudo, so Incus runs natively. The image tag is
-    # dated, never current or edge.
+executors:
+  # A full arm64 VM with sudo, so Incus runs natively. The image tag is
+  # dated, never current or edge.
+  arm-vm:
     machine:
       image: ubuntu-2604:2026.11.1
     resource_class: arm.medium
@@ -12,9 +12,11 @@ jobs:
       CI_TEMP: /tmp/wardian-ci
       UV_VERSION: 0.13.9
       UV_SHA256: 0797542018e541a9288855df555c8077eed06f7a47d206362030480e8ecc9f3d
-    steps:
-      - checkout
 
+commands:
+  start-container:
+    description: Start an Ubuntu 26.04 Incus container that Ansible reaches over SSH as root.
+    steps:
       - run:
           name: Install uv
           command: |
@@ -77,23 +79,36 @@ jobs:
             host_key=$(sudo incus exec "$CONTAINER" -- cat /etc/ssh/ssh_host_ed25519_key.pub)
             echo "$CONTAINER_IP $host_key" > "$CI_TEMP/known_hosts"
 
+  provision:
+    description: Apply the playbook to the container. The output goes to $CI_TEMP/provision.log.
+    steps:
       - run:
-          name: Provision twice, and require no changes the second time
+          name: Provision
           environment:
             ANSIBLE_CONFIG: ansible/ansible.cfg
           command: |
-            provision() {
-              uv run --locked ansible-playbook \
-                --inventory "$CONTAINER_IP," \
-                --user root \
-                --private-key "$CI_TEMP/id_ed25519" \
-                --ssh-common-args "-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$CI_TEMP/known_hosts" \
-                --extra-vars "wardian_resolver=$RESOLVER" \
-                ansible/playbook.yml
-            }
-            provision
-            provision | tee "$CI_TEMP/second-run.log"
-            grep -E ': ok=[0-9]+ +changed=0 +unreachable=0 +failed=0 ' "$CI_TEMP/second-run.log"
+            uv run --locked ansible-playbook \
+              --inventory "$CONTAINER_IP," \
+              --user root \
+              --private-key "$CI_TEMP/id_ed25519" \
+              --ssh-common-args "-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$CI_TEMP/known_hosts" \
+              --extra-vars "wardian_resolver=$RESOLVER" \
+              ansible/playbook.yml \
+              | tee "$CI_TEMP/provision.log"
+
+jobs:
+  incus:
+    executor: arm-vm
+    steps:
+      - checkout
+      - start-container
+      - provision
+      - provision
+
+      - run:
+          name: Require no changes the second time
+          command: |
+            grep -E ': ok=[0-9]+ +changed=0 +unreachable=0 +failed=0 ' "$CI_TEMP/provision.log"
 
       # A positive control for the poweroff check below: with a good ruleset,
       # the container comes back up with nftables loaded.
@@ -131,7 +146,49 @@ jobs:
             echo "$CONTAINER is still $status after 120 seconds"
             exit 1
 
+  # Removes one control at a time and passes only if the tests for that
+  # control fail. The incus job shows the same tests pass with every control
+  # in place.
+  mutation:
+    executor: arm-vm
+    steps:
+      - checkout
+      - start-container
+      - provision
+
+      # nftables.service stays active. Breaking /etc/nftables.conf and
+      # restarting the service instead would power the container off
+      # (FailureAction=poweroff) before the tests ran.
+      - run:
+          name: Without the nftables ruleset, the DNS and egress tests fail
+          command: |
+            sudo incus exec "$CONTAINER" -- nft flush ruleset
+            sudo incus exec "$CONTAINER" -- \
+              /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci \
+              | tee "$CI_TEMP/no-ruleset.jsonl" || true
+            jq -e -s '[.[] | select(.id == "T02" or .id == "T06") | .result] == ["fail", "fail"]' \
+              "$CI_TEMP/no-ruleset.jsonl" \
+              || { echo "T02 and T06 must both fail without the ruleset"; exit 1; }
+
+      - run:
+          name: Load the ruleset again
+          command: sudo incus exec "$CONTAINER" -- systemctl reload nftables.service
+
+      - run:
+          name: Without the Squid allowlist, the blocked-domain test fails
+          command: |
+            sudo incus exec "$CONTAINER" -- sed -i \
+              -e '/^acl allowlist /d' -e '/^http_access deny !allowlist$/d' /etc/squid/squid.conf
+            sudo incus exec "$CONTAINER" -- systemctl restart squid.service
+            sudo incus exec "$CONTAINER" -- \
+              /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci \
+              | tee "$CI_TEMP/no-allowlist.jsonl" || true
+            jq -e -s '[.[] | select(.id == "T03") | .result] == ["fail"]' \
+              "$CI_TEMP/no-allowlist.jsonl" \
+              || { echo "T03 must fail without the allowlist"; exit 1; }
+
 workflows:
   ci:
     jobs:
       - incus
+      - mutation

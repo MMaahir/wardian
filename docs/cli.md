@@ -91,9 +91,14 @@ The unit tests run without a VM.
 
 ## CI
 
-CircleCI runs `.circleci/config.yml` on an Arm machine VM. It starts an Ubuntu 26.04 Incus system container, so the firewall rules never touch the CI host, and then:
+CircleCI runs `.circleci/config.yml` on Arm machine VMs. The `incus` job starts an Ubuntu 26.04 Incus system container, so the firewall rules never touch the CI host, and then:
 
 1. applies the playbook twice over SSH, with `wardian_resolver` set to the Incus bridge, and fails unless the second run reports `changed=0`
 2. restarts the container and checks that nftables loaded
 3. runs the control tests with `--env ci`, through the same `python3 -I` command as `wardian test`
 4. appends a line that isn't nft syntax to `/etc/nftables.conf`, restarts the container, and fails unless it stops within 120 seconds
+
+The `mutation` job runs alongside it in its own container. It applies the playbook once, removes one control at a time, runs the control tests, and fails unless the tests for that control fail:
+
+1. `nft flush ruleset` removes the firewall. T02 (DNS) and T06 (direct egress) must fail. The job flushes the live ruleset rather than breaking `/etc/nftables.conf`, because a ruleset that fails to load powers the container off before the tests run. It then reloads `nftables.service` to put the ruleset back.
+2. Deleting the `allowlist` ACL and its `http_access deny` line from `/etc/squid/squid.conf`, then restarting Squid, removes the allowlist. T03 (a name off the allowlist) must fail.
