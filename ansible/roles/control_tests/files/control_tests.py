@@ -21,8 +21,11 @@ so deleting a test fails the run. Standard library only. Network probes use
 """
 
 import argparse
+import grp
 import json
 import os
+import pwd
+import stat
 import subprocess
 import sys
 
@@ -34,6 +37,10 @@ THREAT_IDS = {
     "T04": ("both", "Squid lets agent reach an allowlisted name"),
     "T05": ("both", "Squid denies private addresses"),
     "T06": ("both", "nftables drops and counts agent's direct connections"),
+    "T07": ("both", "agent can't write the agent CLIs, their config or the token"),
+    "T08": ("both", "Squid denies the agent CLIs' update hosts"),
+    "T09": ("both", "agent's environment has no cloud or AI API variables"),
+    "T10": ("both", "Squid's user and logship can't read the Claude token"),
 }
 for _threat_id, (_env, _) in THREAT_IDS.items():
     if _env not in ("ci", "lima", "both"):
@@ -63,6 +70,47 @@ PRIVATE_ADDRESSES = (
     "[::ffff:192.168.5.2]",
 )
 PUBLIC_ADDRESS = "1.1.1.1"
+TOKEN = "/etc/wardian/claude-token"  # noqa: S105 - a path, not a token
+# What agent must not change: the agent CLIs, their managed config, the token,
+# and the files that put the token and the proxy into its environment. Each
+# tree is checked to every depth, each path on its own.
+PROTECTED_TREES = ("/opt/codex", "/etc/claude-code", "/etc/codex", "/etc/wardian")
+PROTECTED_PATHS = (
+    "/usr/bin",
+    "/usr/bin/claude",
+    "/usr/local/bin",
+    "/usr/local/bin/codex",
+    "/etc/claude-code/managed-settings.json",
+    "/etc/codex/managed_config.toml",
+    "/usr/local/sbin",
+    "/usr/local/sbin/wardian-install-claude-token",
+    "/etc/profile.d",
+    "/etc/profile.d/wardian-claude-token.sh",
+    "/etc/environment",
+    TOKEN,
+)
+# Where Claude Code (native installer, npm) and Codex (GitHub releases) fetch
+# updates. The apt repo is on downloads.claude.ai too.
+UPDATE_HOSTS = (
+    "downloads.claude.ai",
+    "storage.googleapis.com",
+    "registry.npmjs.org",
+    "github.com",
+    "api.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+)
+# AWS, Google (including Gemini), Cloud SDK, Anthropic and OpenAI API variables.
+# CLAUDE_CODE_OAUTH_TOKEN is allowed: it is the sandbox's own Claude token.
+FORBIDDEN_ENV_PREFIXES = (
+    "AWS_",
+    "GOOGLE_",
+    "GEMINI_",
+    "GCLOUD_",
+    "CLOUDSDK_",
+    "ANTHROPIC_",
+    "OPENAI_",
+)
 
 
 def control(threat_id):
@@ -84,6 +132,30 @@ def as_agent(*argv, timeout=60):
         check=False,
         text=True,
         timeout=timeout,
+        # sudo keeps the admin's working directory, which agent can't enter.
+        cwd="/",
+    )
+
+
+def as_user(user, *argv, timeout=30):
+    return subprocess.run(
+        [
+            "/usr/sbin/runuser",
+            "-u",
+            user,
+            "--",
+            "/usr/bin/env",
+            "-i",
+            "PATH=/usr/bin:/bin",
+            *argv,
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=timeout,
+        # sudo keeps the admin's working directory, which agent can't enter.
+        cwd="/",
     )
 
 
@@ -211,6 +283,126 @@ def nftables_drops_direct_connection():
         f"{PUBLIC_ADDRESS}: curl exited {exit_code}, HTTP {code}, "
         f"agent_dropped {before} -> {after} {stderr}"
     )
+
+
+@control("T07")
+def agent_cannot_write_clis_or_token():
+    # exists follows the codex symlink, so a dangling link counts as missing.
+    missing = [p for p in (*PROTECTED_TREES, *PROTECTED_PATHS) if not os.path.exists(p)]
+    if missing:
+        return False, "missing: " + ", ".join(missing)
+    # -writable asks access(2), so the probe writes nothing. find follows the
+    # codex symlink for this test.
+    failures = []
+    for probe in (
+        ("find", *PROTECTED_TREES, "-writable"),
+        ("find", *PROTECTED_PATHS, "-maxdepth", "0", "-writable"),
+    ):
+        result = as_agent(*probe)
+        if result.returncode != 0 or result.stdout.strip():
+            failures.append(
+                f"find exited {result.returncode}, writable: "
+                f"{' '.join(result.stdout.split())} {result.stderr.strip()}"
+            )
+    if failures:
+        return False, "; ".join(failures)
+    count = len(PROTECTED_TREES) + len(PROTECTED_PATHS)
+    return True, f"none of {count} paths is writable by agent"
+
+
+@control("T08")
+def squid_denies_update_hosts():
+    failures = []
+    for host in UPDATE_HOSTS:
+        exit_code, connect, _, stderr = curl(f"https://{host}/", "--proxy", PROXY)
+        if exit_code == 0 or connect != "403":
+            failures.append(
+                f"{host}: curl exited {exit_code}, CONNECT {connect} {stderr}"
+            )
+    if failures:
+        return False, "; ".join(failures)
+    return True, f"CONNECT got 403 for {len(UPDATE_HOSTS)} update hosts"
+
+
+def variable_names(output):
+    return {line.split("=", 1)[0] for line in output.splitlines() if "=" in line}
+
+
+@control("T09")
+def agent_environment_has_no_api_variables():
+    # A login goes through PAM, which reads /etc/environment, then the login
+    # shell reads /etc/profile. su --login runs PAM like an SSH login and then
+    # runs env as the "shell". bash reads /etc/profile but not agent's own
+    # dotfiles. Each probe has a variable it must find, so a probe that read
+    # nothing can't pass.
+    pam = subprocess.run(
+        ["/usr/bin/su", "--login", "--shell", "/usr/bin/env", "agent"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+    profile = as_agent(
+        "bash", "--noprofile", "--norc", "-c", ". /etc/profile && exec env"
+    )
+    failures = []
+    names = set()
+    for label, result, expected in (
+        ("su --login", pam, "HTTPS_PROXY"),
+        ("/etc/profile", profile, "CLAUDE_CODE_OAUTH_TOKEN"),
+    ):
+        found = variable_names(result.stdout)
+        names |= found
+        if result.returncode != 0 or expected not in found:
+            failures.append(
+                f"{label} exited {result.returncode} without {expected}: "
+                f"{result.stderr.strip()}"
+            )
+    forbidden = sorted(n for n in names if n.startswith(FORBIDDEN_ENV_PREFIXES))
+    if forbidden:
+        failures.append("forbidden variables: " + ", ".join(forbidden))
+    if failures:
+        return False, "; ".join(failures)
+    return True, f"{len(names)} variables, none forbidden"
+
+
+@control("T10")
+def others_cannot_read_token():
+    info = os.stat(TOKEN)
+    group = grp.getgrgid(info.st_gid)
+    failures = []
+    mode = stat.S_IMODE(info.st_mode)
+    if info.st_uid != 0 or group.gr_name != "agent" or mode != 0o640:
+        failures.append(
+            f"{TOKEN} is {pwd.getpwuid(info.st_uid).pw_name}:{group.gr_name} {mode:04o}, "
+            "not root:agent 0640"
+        )
+    # Anyone in the agent group could read it. Only agent may be.
+    members = set(group.gr_mem) | {
+        user.pw_name for user in pwd.getpwall() if user.pw_gid == info.st_gid
+    }
+    if members != {"agent"}:
+        failures.append("agent group members: " + ", ".join(sorted(members)))
+    details = []
+    for user in ("proxy", "logship"):
+        try:
+            pwd.getpwnam(user)
+        except KeyError:
+            if user == "proxy":
+                failures.append("no proxy user")
+            details.append(f"no {user} user yet")
+            continue
+        result = as_user(user, "cat", TOKEN)
+        if result.returncode == 0 or "Permission denied" not in result.stderr:
+            failures.append(
+                f"cat as {user} exited {result.returncode}: {result.stderr.strip()}"
+            )
+        else:
+            details.append(f"{user}: Permission denied")
+    if failures:
+        return False, "; ".join(failures)
+    return True, f"{TOKEN} is root:agent 0640; " + ", ".join(details)
 
 
 def main(argv=None):

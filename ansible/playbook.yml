@@ -20,4 +20,8 @@
     - resolver
     - squid
     - nftables
+    - agent_clis
+    - claude_token
     - control_tests
+    # Last: after it, the playbook's own sessions go through Squid.
+    - proxy_environment

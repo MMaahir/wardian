@@ -1,0 +1,18 @@
+#!/bin/sh
+# Installs the Claude token it reads on stdin as /etc/wardian/claude-token,
+# root:agent 0640. `wardian create` pipes the token in from the Mac's
+# Keychain. The token goes to a temporary file in the same directory first,
+# so a failed copy never replaces or truncates a good token.
+set -eu
+umask 077
+tmp=$(mktemp /etc/wardian/.claude-token.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+cat > "$tmp"
+if [ ! -s "$tmp" ]; then
+	echo "wardian-install-claude-token: no token on stdin" >&2
+	exit 1
+fi
+chown root:agent "$tmp"
+chmod 0640 "$tmp"
+mv -f "$tmp" /etc/wardian/claude-token
+trap - EXIT

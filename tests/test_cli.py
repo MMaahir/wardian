@@ -93,3 +93,44 @@ def test_destroy_refuses_instance_wardian_did_not_create(
 
     assert cli.main(["destroy"]) == 1
     assert "wasn't made by wardian create" in capsys.readouterr().err
+
+
+def test_reads_claude_token_from_keychain(monkeypatch):
+    calls = []
+
+    def fake_capture(cmd, stdin_data=None):
+        calls.append(cmd)
+        return "sk-ant-oat01-abc_DEF-123\n"
+
+    monkeypatch.setattr(cli, "capture", fake_capture)
+
+    assert cli.read_claude_token() == b"sk-ant-oat01-abc_DEF-123"
+    assert calls == [
+        ["security", "find-generic-password", "-s", "wardian-claude-token", "-w"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "item", ["", "\n", "hunter2\n", "sk-ant-api03-key\n", "sk-ant-oat01-a\nb\n"]
+)
+def test_refuses_keychain_item_that_is_not_a_claude_token(item, monkeypatch):
+    monkeypatch.setattr(cli, "capture", lambda cmd, stdin_data=None: item)
+
+    with pytest.raises(cli.WardianError, match="isn't a Claude token") as exc:
+        cli.read_claude_token()
+    if item.strip():
+        assert item.strip() not in str(exc.value)
+
+
+def test_create_stops_before_building_a_vm_without_a_token(
+    tmp_path, monkeypatch, no_subprocess, capsys
+):
+    monkeypatch.setenv("LIMA_HOME", str(tmp_path))
+
+    def missing(cmd, stdin_data=None):
+        raise cli.WardianError("security find-generic-password exited 44")
+
+    monkeypatch.setattr(cli, "capture", missing)
+
+    assert cli.main(["create"]) == 1
+    assert "security add-generic-password" in capsys.readouterr().err

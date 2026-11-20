@@ -124,6 +124,14 @@ jobs:
             done
             sudo incus exec "$CONTAINER" -- systemctl is-active nftables.service
 
+      # The same script `wardian create` pipes the Keychain token into. The
+      # token tests check the file it writes.
+      - run:
+          name: Install a fake Claude token
+          command: |
+            printf 'sk-ant-oat01-not-a-real-token' \
+              | sudo incus exec "$CONTAINER" -- /usr/local/sbin/wardian-install-claude-token
+
       - run:
           name: Run the control tests
           command: |
