@@ -1,0 +1,9 @@
+# snapd refreshes snaps and packagekit fetches package lists, both as root
+# and both on their own schedule. Nothing in the sandbox needs either.
+- name: Remove snapd and packagekit
+  ansible.builtin.apt:
+    name:
+      - snapd
+      - packagekit
+    state: absent
+    purge: true

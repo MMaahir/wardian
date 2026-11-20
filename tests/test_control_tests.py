@@ -1,7 +1,6 @@
 import importlib.util
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -16,9 +15,7 @@ def control_tests(monkeypatch):
     spec = importlib.util.spec_from_file_location("control_tests", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setattr(
-        module.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_name="agent")
-    )
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
     monkeypatch.setattr(
         module,
         "THREAT_IDS",

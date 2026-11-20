@@ -7,13 +7,14 @@
 
 # A typo fails the playbook here, not the next boot.
 - name: Install the ruleset
-  ansible.builtin.copy:
-    src: nftables.conf
+  ansible.builtin.template:
+    src: nftables.conf.j2
     dest: /etc/nftables.conf
     owner: root
     group: root
     mode: "0644"
     validate: nft -c -f %s
+  register: nftables_ruleset
   notify: Reload nftables
 
 - name: Create the nftables.service drop-in directory
@@ -33,9 +34,36 @@
     mode: "0644"
   register: nftables_dropin
 
+# The kernel tracks connections only while a loaded rule uses conntrack, and
+# on a fresh guest none does. When the drop policy loads, the kernel picks up
+# Ansible's open SSH connection mid-stream as new and drops sshd's replies,
+# and the play hangs. This table tracks every packet and accepts it, so the
+# connection is already established when the drop policy loads.
+- name: Track connections before the ruleset loads
+  ansible.builtin.command:
+    argv: [nft, -f, -]
+    stdin: |
+      table inet wardian_handover {
+        chain output {
+          type filter hook output priority filter; policy accept;
+          ct state established,related accept
+        }
+      }
+  when: nftables_ruleset is changed
+  changed_when: true
+
 - name: Enable and start nftables
   ansible.builtin.systemd_service:
     name: nftables.service
     enabled: true
     state: started
     daemon_reload: "{{ nftables_dropin is changed }}"
+
+- name: Load the ruleset now
+  ansible.builtin.meta: flush_handlers
+
+- name: Remove the handover table
+  ansible.builtin.command:
+    argv: [nft, delete, table, inet, wardian_handover]
+  when: nftables_ruleset is changed
+  changed_when: true

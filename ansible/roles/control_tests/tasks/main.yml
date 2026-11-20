@@ -1,3 +1,13 @@
+# The probes the tests run as agent. resolvectl comes with systemd.
+- name: Install the control test tools
+  ansible.builtin.apt:
+    name:
+      - bind9-dnsutils
+      - curl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
 # Root-owned, so agent can't change the tests that judge it.
 - name: Create the control test directory
   ansible.builtin.file:
