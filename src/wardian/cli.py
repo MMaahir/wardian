@@ -178,6 +178,9 @@ def ssh_options(name: str) -> list[str]:
         "-o", "BatchMode=yes",
         "-o", "IdentitiesOnly=yes",
         "-o", "ForwardAgent=no",
+        # Never use an existing master connection, which skips the key check.
+        "-o", "ControlMaster=no",
+        "-o", "ControlPath=none",
         "-o", "StrictHostKeyChecking=yes",
         "-o", f"HostKeyAlias={name}",
         "-o", f"UserKnownHostsFile={known_hosts_file(name)}",
