@@ -9,7 +9,7 @@ Terraform manages the rulesets on `MMaahir/wardian`. The `main` ruleset blocks f
 
 ## Change a ruleset
 
-Run these from this directory. If `terraform.tfstate` is missing, as in a fresh clone, restore it from the backup or import the ruleset first (see [State](#state)). Without it, the plan tries to create a second `main` ruleset.
+Run these from this directory. If `terraform.tfstate` is missing, as in a fresh clone, run `terraform init`, then restore the state from the backup or import the ruleset (see [State](#state)) before you plan. Without it, the plan tries to create a second `main` ruleset.
 
 ```sh
 terraform init
