@@ -1,8 +1,8 @@
 #!/usr/sbin/nft -f
 # Wardian's firewall. Every user reaches public IPv4 addresses and the
-# resolver. No user reaches an IPv4 address in private4 below, or any IPv6
-# address off loopback, so nothing in the guest reaches the Mac or the LAN. The
-# order is the one issue #1 gives.
+# resolver. Apart from loopback, DNS and DHCP renewals, no user reaches an IPv4
+# address in private4 below, or any IPv6 address, so nothing in the guest
+# reaches the Mac or the LAN. The order is the one issue #1 gives.
 #
 # This file replaces only table inet wardian, never the whole ruleset. Lima
 # keeps its own "ip nat" table in the guest, and `flush ruleset` would remove it.
