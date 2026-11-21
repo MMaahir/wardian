@@ -110,11 +110,38 @@ def test_powers_off_even_when_stderr_is_broken(worker, monkeypatch, unchanged):
     calls = []
     monkeypatch.setattr(worker, "firewall_unchanged", unchanged)
     monkeypatch.setattr(worker.sys, "stderr", BrokenStderr())
-    monkeypatch.setattr(
-        worker.subprocess, "run", lambda argv, **kwargs: calls.append(argv)
-    )
+
+    def systemctl(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(worker.subprocess, "run", systemctl)
     assert worker.check_firewall() is False
-    assert calls == [["/usr/bin/systemctl", "poweroff"]]
+    assert calls == [["/usr/bin/systemctl", "poweroff", "--force"]]
+
+
+def test_poweroff_falls_back_to_reboot_syscall(worker, monkeypatch):
+    calls = []
+
+    def systemctl(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0 if len(calls) == 2 else 1)
+
+    monkeypatch.setattr(worker.subprocess, "run", systemctl)
+    assert worker.power_off() is True
+    assert calls == [
+        ["/usr/bin/systemctl", "poweroff", "--force"],
+        ["/usr/bin/systemctl", "poweroff", "--force", "--force"],
+    ]
+
+
+def test_poweroff_reports_failure(worker, monkeypatch):
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1),
+    )
+    assert worker.power_off() is False
 
 
 def test_waits_for_the_status_file(wardian_apt, tmp_path, monkeypatch):

@@ -39,6 +39,12 @@
     mode: "0440"
     validate: visudo -cf %s
 
+# The check above reads only the new file. This one reads the whole policy.
+- name: Check the installed sudoers policy
+  ansible.builtin.command:
+    argv: [visudo, -c]
+  changed_when: false
+
 - name: Create the snapshot directory
   ansible.builtin.file:
     path: /var/lib/wardian

@@ -323,10 +323,21 @@ def agent_cannot_write_clis_or_token():
                 f"find exited {result.returncode}, writable: "
                 f"{' '.join(result.stdout.split())} {result.stderr.strip()}"
             )
+    # The owner can chmod a read-only file, so every path must be root's too.
+    for probe in (
+        ("/usr/bin/find", *PROTECTED_TREES, "!", "-user", "root"),
+        ("/usr/bin/find", *PROTECTED_PATHS, "-maxdepth", "0", "!", "-user", "root"),
+    ):
+        result = run([*AS_ROOT, *probe])
+        if result.returncode != 0 or result.stdout.strip():
+            failures.append(
+                f"find exited {result.returncode}, not owned by root: "
+                f"{' '.join(result.stdout.split())} {result.stderr.strip()}"
+            )
     if failures:
         return False, "; ".join(failures)
     count = len(PROTECTED_TREES) + len(PROTECTED_PATHS)
-    return True, f"none of {count} paths is writable by agent"
+    return True, f"none of {count} paths is writable by agent, and root owns them"
 
 
 def variables(output):

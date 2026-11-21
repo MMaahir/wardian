@@ -103,15 +103,32 @@ def check_firewall():
         reason = "the firewall no longer matches its snapshot"
     except Exception as exc:  # noqa: BLE001 - any failure to check is a mismatch
         reason = f"can't check the firewall: {exc!r}"
-    subprocess.run(
-        ["/usr/bin/systemctl", "poweroff"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-        env=ENV,
-    )
-    say(f"wardian-apt: {reason}. Powering off.")
+    if power_off():
+        say(f"wardian-apt: {reason}. Powering off.")
+    else:
+        say(f"wardian-apt: {reason}, and the poweroff failed. Delete the sandbox.")
+    return False
+
+
+def power_off():
+    """Return True once systemd has accepted a poweroff.
+
+    A plain `systemctl poweroff` goes through logind, which refuses it while
+    anyone holds a block inhibitor, root included. --force asks systemd's
+    manager directly, past logind. --force --force, the fallback, calls
+    reboot(2) itself.
+    """
+    for force in (["--force"], ["--force", "--force"]):
+        result = subprocess.run(
+            ["/usr/bin/systemctl", "poweroff", *force],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            env=ENV,
+        )
+        if result.returncode == 0:
+            return True
     return False
 
 

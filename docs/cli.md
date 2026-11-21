@@ -51,7 +51,7 @@ Codex logs in per sandbox. As `agent`, run `codex login --device-auth` and appro
 sudo -n /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env lima
 ```
 
-Root sets up T06's and T12's fixtures, reads the firewall's counters, and runs the T06 probes that must fail for root too. Every other probe runs as `agent` with an empty environment, through `runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin`.
+Root sets up T06's network fixture and, in CI, T13's fake `jq` package, reads the firewall's counters, and runs the T06 probes that must fail for root too. Every other probe runs as `agent` with an empty environment, through `runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin`.
 
 It prints `PASS`, `FAIL` or `SKIP` for each threat ID and exits 1 if any test fails or none passes.
 
@@ -141,7 +141,7 @@ rm -f ~/.ssh/known_hosts.d/wardian
 |---|---|---|
 | T01 | both | `sudo -n -l` as `agent` succeeds and lists exactly one grant, `(root) NOPASSWD: /usr/local/sbin/wardian-apt`. Any other grant fails the test. |
 | T06 | both | Neither `agent` nor root can reach the fixture, and the drop counters go up. The fixture is a listener on port 8080 in its own network namespace, behind a veth pair, at `172.31.255.2` and `fd77:6172:6469::2`. The probes are curl to each address, and to `wardian-fixture.test`, a name that resolves to `172.31.255.2` through an `/etc/hosts` mounted in a private mount namespace. Before the probes, the test checks the fixture answers inside its own namespace. Each probe must fail and raise `private4_dropped` or `ipv6_dropped`. |
-| T07 | both | `find -writable` as `agent` finds nothing in `/opt/codex`, `/etc/claude-code`, `/etc/codex`, `/etc/wardian` or `/var/lib/wardian`, and none of `/usr/bin/claude`, `/usr/local/bin/codex`, the managed config and instruction files, the token, the install script, `wardian-apt`, its worker in `/usr/local/libexec`, `/etc/sudoers.d`, the two login profile scripts, `/etc/environment` or their directories is writable. Every path must exist. `agent` can't stat files in `/etc/sudoers.d`, which is `0750` on Ubuntu, so T01 checks the grant instead. |
+| T07 | both | `find -writable` as `agent` finds nothing in `/opt/codex`, `/etc/claude-code`, `/etc/codex`, `/etc/wardian` or `/var/lib/wardian`, and none of `/usr/bin/claude`, `/usr/local/bin/codex`, the managed config and instruction files, the token, the install script, `wardian-apt`, its worker in `/usr/local/libexec`, `/etc/sudoers.d`, the two login profile scripts, `/etc/environment` or their directories is writable. Root must own every one of these paths and everything in the five directories, since an owner can `chmod` a read-only file. Every path must exist. `agent` can't stat files in `/etc/sudoers.d`, which is `0750` on Ubuntu, so T01 checks the grant instead. |
 | T09 | both | `agent`'s login environment has no proxy variable, in either case, and no variable starting with `AWS_`, `GOOGLE_`, `GEMINI_`, `GCLOUD_`, `CLOUDSDK_`, `ANTHROPIC_` or `OPENAI_`. One probe is `su --login` with `env` as the shell, which runs PAM and so reads `/etc/environment`. The other sources `/etc/profile` without `agent`'s dotfiles. Each must find `WARDIAN_SANDBOX=1`, so a probe that read nothing fails, and the second must also find `CLAUDE_CODE_OAUTH_TOKEN`. #27 makes the token check follow the agent mode. |
 | T10 | both | `/etc/wardian/claude-token` is `root:agent 0640`, `agent` is the only member of the `agent` group, and `cat` of the token as `nobody` gets `Permission denied`. #27 makes the test follow the agent mode. |
 | T11 | both | As `agent`, with no proxy variables, curl downloads `https://pypi.org/simple/pip/` directly and gets HTTP 200. |
@@ -154,7 +154,7 @@ T02 (no DNS), T03, T04, T05 (Squid) and T08 (no update host) were retired by #26
 
 ## Egress
 
-Every user in the guest reaches public IPv4 addresses directly, with DNS. No user reaches a private, link-local, CGNAT, metadata, multicast or reserved IPv4 address, or any IPv6 address other than loopback, so nothing in the guest reaches the Mac or the LAN.
+Every user in the guest reaches public IPv4 addresses directly, with DNS. No user reaches an IPv4 address in the `private4` set listed below, or any IPv6 address other than loopback, so nothing in the guest reaches the Mac or the LAN.
 
 The nftables ruleset in `/etc/nftables.conf` replaces only `table inet wardian`, never Lima's `ip nat` table. The output chain's policy is drop. In order:
 
@@ -163,7 +163,7 @@ The nftables ruleset in `/etc/nftables.conf` replaces only `table inet wardian`,
 3. DNS, TCP and UDP port 53, to the resolver.
 4. DHCP renewals from `systemd-network` to the resolver.
 5. All other IPv6 is dropped.
-6. Any IPv4 destination in the `private4` set is dropped: RFC 1918, loopback, link-local (including 169.254.169.254), CGNAT, multicast and reserved ranges. That covers the resolver's other ports and the Mac's LAN address.
+6. Any IPv4 destination in the `private4` set is dropped: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16` (including 169.254.169.254), `172.16.0.0/12`, `192.0.0.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `224.0.0.0/4` (multicast) and `240.0.0.0/4`. That covers the resolver's other ports and the Mac's LAN address. The documentation ranges `192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24` aren't in the set.
 7. Everything else is accepted.
 
 Drops go through one rate-limited log rule with the prefix `wardian-drop: ` and the UID, then a counter and drop rule with no limit. The named counters `ipv6_dropped` and `private4_dropped` show which rule dropped a packet, and `dropped` counts them all: `sudo nft list counters table inet wardian`.
@@ -183,7 +183,9 @@ The worker does the work outside `sudo` and the caller's session. Once it has st
 1. Runs from `/` with `umask 022`, takes an exclusive `flock` on `/run/wardian-apt.lock`, and gives every `apt-get` call a fixed environment (`PATH`, `HOME=/root`, `LC_ALL=C.UTF-8`, `DEBIAN_FRONTEND=noninteractive`), `-o DPkg::Lock::Timeout=120` and `-o APT::Cmd::Pattern-Only=true`. Without Pattern-Only, apt-get treats a name no package has, such as `a.*b`, as a regular expression and installs every package it matches.
 2. Runs `apt-get update`, then `apt-get -s install --no-install-recommends -- <names>`. If the simulated transaction would remove, upgrade, downgrade or reinstall an installed package, it exits 3 and says to fetch the work and recreate the sandbox.
 3. Runs `apt-get install -y --no-remove --no-install-recommends -o Dpkg::Options::=--force-confold -- <names>`.
-4. Whatever happened after it took the lock, checks that `nft -s list table inet wardian` matches `/var/lib/wardian/inet-wardian.nft` and that `/etc/nftables.conf` matches the SHA-256 in `/var/lib/wardian/nftables.conf.sha256`. On a mismatch, or if it can't check, it runs `systemctl poweroff` and exits 4.
+4. Whatever happened after it took the lock, checks that `nft -s list table inet wardian` matches `/var/lib/wardian/inet-wardian.nft` and that `/etc/nftables.conf` matches the SHA-256 in `/var/lib/wardian/nftables.conf.sha256`. On a mismatch, or if it can't check, it runs `systemctl poweroff --force` and exits 4. A plain `systemctl poweroff` goes through logind, which refuses while anyone holds a block inhibitor, root included. `--force` asks systemd directly, skipping the orderly stop of services. If that fails, `--force --force` calls `reboot(2)`.
+
+After a `wardian-apt` poweroff, don't go on using the sandbox. If `/etc/nftables.conf` changed and still loads, the sandbox boots with the changed firewall, and nothing checks it again until the next `wardian-apt`. Delete it (see [Discarding a sandbox by hand](#discarding-a-sandbox-by-hand)). To keep its work, start it, fetch, and delete it straight after.
 
 The sources are the ones provisioning configured: Ubuntu's archive and Anthropic's signed Claude Code repo. Background apt jobs, unattended-upgrades, snapd and packagekit are off, and provisioning runs a full upgrade before the firewall starts, because an nftables package upgrade can restart the service, and its `ExecStop` flushes every table, Lima's included. Claude Code is installed after that and held. So a new package rarely needs a newer version of one already installed. When it does, `wardian-apt` refuses.
 
@@ -223,10 +225,10 @@ CircleCI runs `.circleci/config.yml` on Arm machine VMs. The `incus` job starts 
 3. installs a fake Claude token through `wardian-install-claude-token`, then runs the control tests with `--env ci`, through the same `python3 -I` command as `wardian test`
 4. appends a line that isn't nft syntax to `/etc/nftables.conf`, restarts the container, and fails unless it stops within 120 seconds
 
-The `mutation` job runs alongside it in its own container. It applies the playbook once, removes one control at a time from the live ruleset, runs `control_tests.py --env ci --only T06`, and fails unless T06 fails because `agent` reached the fixture:
+The `mutation` job runs alongside it in its own container. It applies the playbook once, removes one control at a time from the live ruleset, and checks each change:
 
-1. It deletes the private-range drop rule. `agent` must reach `172.31.255.2`. Then it reloads `nftables.service` to put the rule back.
-2. It deletes the IPv6 drop rule. `agent` must reach `fd77:6172:6469::2`. Then it reloads again.
-3. It inserts an accept rule into `inet wardian` and holds `/run/wardian-apt.lock`, so the worker waits before it installs anything. As `agent`, it starts `sudo wardian-apt jq`, waits for the worker's unit, and sends `SIGALRM` to `sudo`. Root then kills any front end left and checks the worker is still running. Only then does it release the lock, and it fails unless the container stops within 120 seconds.
+1. It deletes the private-range drop rule and runs `control_tests.py --env ci --only T06`, which must fail because `agent` and root reached `172.31.255.2` and the fixture's name. Then it reloads `nftables.service` to put the rule back.
+2. It deletes the IPv6 drop rule and runs T06 again, which must fail because `agent` and root reached `fd77:6172:6469::2`. Then it reloads again.
+3. It inserts an accept rule into `inet wardian`, holds a block shutdown inhibitor, which makes logind refuse a plain poweroff even for root, and holds `/run/wardian-apt.lock`, so the worker waits before it installs anything. As `agent`, it starts `sudo wardian-apt jq`, waits for the worker's unit, and sends `SIGALRM` to `sudo`. Root then kills any front end left and checks the worker is still running. Only then does it release the lock, and it fails unless the container stops within 120 seconds.
 
 It deletes rules from the live ruleset rather than breaking `/etc/nftables.conf`, because a ruleset that fails to load powers the container off before the tests run.
