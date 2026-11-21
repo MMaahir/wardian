@@ -4,16 +4,17 @@
 
 - creates the unprivileged `agent` user
 - creates `/home/agent/project`, the git repo the agents work in
-- removes snapd and packagekit
+- stops and masks the background apt jobs, and removes snapd, packagekit and unattended-upgrades
 - writes a static `/etc/resolv.conf` and masks systemd-resolved
-- installs Squid with the allowlist (replaced by #26)
+- upgrades every installed package, before the firewall starts
 - installs the nftables ruleset, with a drop-in that powers the guest off if the ruleset fails to load
-- installs Claude Code, Codex and ripgrep, with root-owned managed settings for both CLIs
+- installs Claude Code, Codex and ripgrep, with root-owned managed settings and instructions for both CLIs, and holds Claude Code at its version
+- installs `wardian-apt`, its sudoers line, and a snapshot of the firewall it checks
 - creates `/etc/wardian` for the Claude token, the script that installs the token, and the login profile script that exports it
+- sets `WARDIAN_SANDBOX=1` in `/etc/environment` and `/etc/profile.d/wardian-sandbox.sh`
 - installs the control tests
-- points `/etc/environment` at Squid (replaced by #26)
 
-> **Being re-scoped.** Issue #1 changed on 2026-11-20 (see [ADR 0001](adr/0001-open-egress-instead-of-an-allowlist.md)). Squid and the allowlist give way to open egress with private-range drops and the `wardian-apt` wrapper (#26). `agent` gets its own SSH key, a T3 host block and one login per sandbox (#27). `wardian push` and `wardian fetch` replace the manual git setup (#28). This page describes the code on `main`, and each of those tickets updates it as it lands. Sections marked "Replaced by" describe behaviour that is going away.
+> **Being re-scoped.** Issue #1 changed on 2026-11-20 (see [ADR 0001](adr/0001-open-egress-instead-of-an-allowlist.md)). #26 replaced Squid and the allowlist with open egress and `wardian-apt`. `agent` gets its own SSH key, a T3 host block and one login per sandbox (#27). `wardian push` and `wardian fetch` replace the manual git setup (#28). This page describes the code on `main`, and each of those tickets updates it as it lands. Sections marked "Replaced by" describe behaviour that is going away.
 
 ## Requirements
 
@@ -50,7 +51,7 @@ Codex logs in per sandbox. As `agent`, run `codex login --device-auth` and appro
 sudo -n /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env lima
 ```
 
-Root only reads the firewall's counters. The script runs every probe as `agent` with an empty environment, through `runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin`.
+Root sets up T06's network fixture and, in CI, T13's fake `jq` package, reads the firewall's counters, runs the T06 probes that must fail for root too, and checks who owns T07's paths. T10 tries to read the token as `nobody` and must get `Permission denied`. Every other probe runs as `agent` with an empty environment, through `runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin`.
 
 It prints `PASS`, `FAIL` or `SKIP` for each threat ID and exits 1 if any test fails or none passes.
 
@@ -130,7 +131,7 @@ limactl delete --force wardian
 rm -f ~/.ssh/known_hosts.d/wardian
 ```
 
-**Any work in the sandbox that you haven't fetched is lost.** If the VM still boots, `limactl start wardian` and a fetch first.
+**Any work in the sandbox that you haven't fetched is lost.** After the boot-time poweroff, the VM can't boot until the ruleset loads, so the work can't be fetched. After a `wardian-apt` poweroff, don't start it to fetch: see [Packages](#packages).
 
 ## Control tests
 
@@ -138,46 +139,65 @@ rm -f ~/.ssh/known_hosts.d/wardian
 
 | Threat ID | Runs in | Checks |
 |---|---|---|
-| T01 | both | Changes in #26 to pass only when the grant is exactly `wardian-apt`. `agent` can't use sudo: `sudo -n -l` fails and says `agent` may not run sudo. Any grant, even for one command, fails the test. |
-| T02 | both | Retired by #26. `agent` can't resolve a name: `dig` over UDP and TCP, `getent hosts` and `resolvectl query` all fail. |
-| T03 | both | Retired by #26. Squid answers 403 to a CONNECT for `example.com`, which isn't on the allowlist. |
-| T04 | both | Retired by #26. A CONNECT through Squid to `api.anthropic.com` gets 200, and an HTTP reply comes back through the tunnel. |
-| T05 | both | Retired by #26. Squid answers 403 to a CONNECT for private, loopback, link-local and metadata addresses, IPv4 and IPv6. |
-| T06 | both | Changes in #26 to private IPv4 and non-loopback IPv6 drops for every user. A direct connection from `agent` to `1.1.1.1:443` fails, and the `agent_dropped` counter goes up. |
-| T07 | both | `find -writable` as `agent` finds nothing in `/opt/codex`, `/etc/claude-code`, `/etc/codex` or `/etc/wardian`, and none of `/usr/bin/claude`, `/usr/local/bin/codex`, the two managed config files, the token, the install script, the login profile script, `/etc/environment` or their directories is writable. Every path must exist. |
-| T08 | both | Retired by #26. Squid answers 403 to a CONNECT for each host the CLIs could update from: `downloads.claude.ai`, `storage.googleapis.com`, `registry.npmjs.org` and GitHub's release hosts. |
-| T09 | both | `agent`'s login environment has no variable starting with `AWS_`, `GOOGLE_`, `GEMINI_`, `GCLOUD_`, `CLOUDSDK_`, `ANTHROPIC_` or `OPENAI_`. One probe is `su --login` with `env` as the shell, which runs PAM and so reads `/etc/environment`. The other sources `/etc/profile` without `agent`'s dotfiles. Each must find a variable it expects (`HTTPS_PROXY`, `CLAUDE_CODE_OAUTH_TOKEN`), so a probe that read nothing fails. #26 and #27 change the sentinel to `WARDIAN_SANDBOX=1` and make the token check follow the agent mode. |
-| T10 | both | `/etc/wardian/claude-token` is `root:agent 0640`, `agent` is the only member of the `agent` group, and `cat` of the token as `proxy` (Squid's user) gets `Permission denied`. #12 was closed, so `logship` won't exist. #26 moves the probe off `proxy`, and #27 makes the test follow the agent mode. |
+| T01 | both | `sudo -n -l` as `agent` succeeds and lists exactly one grant, `(root) NOPASSWD: /usr/local/sbin/wardian-apt`. Any other grant fails the test. |
+| T06 | both | Neither `agent` nor root can reach the fixture, and the drop counters go up. The fixture is a listener on port 8080 in its own network namespace, behind a veth pair, at `172.31.255.2` and `fd77:6172:6469::2`. The probes are curl to each address, and to `wardian-fixture.test`, a name that resolves to `172.31.255.2` through an `/etc/hosts` mounted in a private mount namespace. Before the probes, the test checks the fixture answers inside its own namespace. Each probe must fail and raise `private4_dropped` or `ipv6_dropped`. |
+| T07 | both | `find -writable` as `agent` finds nothing in `/opt/codex`, `/etc/claude-code`, `/etc/codex`, `/etc/wardian` or `/var/lib/wardian`, and none of `/usr/bin/claude`, `/usr/local/bin/codex`, the managed config and instruction files, the token, the install script, `wardian-apt`, its worker in `/usr/local/libexec`, `/etc/sudoers.d`, the two login profile scripts, `/etc/environment` or their directories is writable. Root must own every one of these paths, checked at the target for a symlink, and everything in the five directories, since an owner can `chmod` a read-only file. Every path must exist. `agent` can't stat files in `/etc/sudoers.d`, which is `0750` on Ubuntu, so T01 checks the grant instead. |
+| T09 | both | `agent`'s login environment has no proxy variable, in either case, and no variable starting with `AWS_`, `GOOGLE_`, `GEMINI_`, `GCLOUD_`, `CLOUDSDK_`, `ANTHROPIC_` or `OPENAI_`. One probe is `su --login` with `env` as the shell, which runs PAM and so reads `/etc/environment`. The other sources `/etc/profile` without `agent`'s dotfiles. Each must find `WARDIAN_SANDBOX=1`, so a probe that read nothing fails, and the second must also find `CLAUDE_CODE_OAUTH_TOKEN`. #27 makes the token check follow the agent mode. |
+| T10 | both | `/etc/wardian/claude-token` is `root:agent 0640`, `agent` is the only member of the `agent` group, and `cat` of the token as `nobody` gets `Permission denied`. #27 makes the test follow the agent mode. |
+| T11 | both | As `agent`, with no proxy variables, curl downloads `https://pypi.org/simple/pip/` directly and gets HTTP 200. |
+| T12 | both | As `agent`, `sudo -n wardian-apt` exits 2 for options (`-y`, `--reinstall`, `-o...`), paths, `.deb` files, names ending in `+` or `-`, a stray `--` and no names. `wardian-apt z.h`, a valid name that apt-get would otherwise treat as a regular expression matching `zsh`, fails with `Unable to locate package`. `wardian-apt jq` exits 0 and leaves `jq` installed. If `jq` is already installed, the test leaves it alone, because once the archive has a newer `jq`, `wardian-apt` refuses the upgrade. The test never removes a package. |
+| T13 | ci | With a fake `jq` 0~wardian installed through `dpkg`, `wardian-apt jq` would upgrade it, so it exits 3 and says to recreate the sandbox. The test then purges `jq`, which is why it runs only in CI. |
+
+T02 (no DNS), T03, T04, T05 (Squid) and T08 (no update host) were retired by #26.
+
+`--only <ID>`, repeatable, runs only those threat IDs and reports the rest as skipped. The mutation job uses it. `wardian test` never passes it.
 
 ## Egress
 
-> Replaced by #26. `agent` will reach public IPv4 hosts directly with DNS, and nftables will drop every private, link-local and metadata IPv4 address and all non-loopback IPv6 for every user. Squid and the proxy block in `/etc/environment` go away.
+Every user in the guest reaches public IPv4 addresses directly, with DNS. Apart from loopback, DNS to the resolver and DHCP renewals, no user reaches an IPv4 address in the `private4` set listed below, or any IPv6 address, so nothing in the guest reaches the Mac or the LAN.
 
-`agent` reaches the internet only through Squid on `127.0.0.1:3128`, which allows CONNECT to port 443 for `api.anthropic.com`, `chatgpt.com` and `auth.openai.com`, the list from the spike's phase 2. Squid denies other names before it looks them up, and denies allowlisted names that resolve to a private address.
-
-The nftables ruleset in `/etc/nftables.conf` drops outbound traffic for every user unless a rule accepts it. In order:
+The nftables ruleset in `/etc/nftables.conf` replaces only `table inet wardian`, never Lima's `ip nat` table. The output chain's policy is drop. In order:
 
 1. Established and related traffic.
-2. `agent` to Squid's port and to non-DNS loopback ports.
-3. Squid's user to the resolver on port 53, and to public addresses on port 443. Private ranges are dropped.
-4. `systemd-network` to the resolver for DHCP renewals.
-5. Root and `_apt` to the resolver on port 53, and to public addresses on ports 80 and 443. Private ranges are dropped.
-6. Everything else goes through one rate-limited log rule with the prefix `wardian-drop:`, then a counter and drop rule with no limit.
+2. Traffic out of `lo`, for every user.
+3. DNS, TCP and UDP port 53, to the resolver.
+4. DHCP renewals from `systemd-network` to the resolver.
+5. All other IPv6 is dropped.
+6. Any IPv4 destination in the `private4` set is dropped: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16` (including 169.254.169.254), `172.16.0.0/12`, `192.0.0.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `224.0.0.0/4` (multicast) and `240.0.0.0/4`. That covers the resolver's other ports and the Mac's LAN address. The documentation ranges `192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24` aren't in the set.
+7. Everything else is accepted.
 
-The named counters `agent_dropped`, `proxy_private_dropped` and `dropped` show which rule dropped a packet: `sudo nft list counters table inet wardian`.
+Drops go through one rate-limited log rule with the prefix `wardian-drop: ` and the UID, then a counter and drop rule with no limit. The named counters `ipv6_dropped` and `private4_dropped` show which rule dropped a packet, and `dropped` counts them all: `sudo nft list counters table inet wardian`.
 
 The only resolver is `wardian_resolver`, written to a static `/etc/resolv.conf`. systemd-resolved and its sockets are masked.
 
-A block in `/etc/environment` sets `http_proxy`, `https_proxy` and their uppercase forms to Squid, and `no_proxy` and `NO_PROXY` to `localhost,127.0.0.1,::1`. Lima keeps its own lines in that file. The playbook writes this block last, because PAM reads `/etc/environment` for every later SSH and sudo session, the playbook's own included, and Squid would deny its package downloads.
+`/etc/environment` holds no proxy variables. It and `/etc/profile.d/wardian-sandbox.sh` set `WARDIAN_SANDBOX=1`. Lima keeps its own lines in `/etc/environment`.
+
+## Packages
+
+`agent` installs system packages with `sudo wardian-apt <package>...`. Its only sudoers line is `agent ALL=(root) NOPASSWD: /usr/local/sbin/wardian-apt`, in `/etc/sudoers.d/wardian-apt`, with sudo's default `env_reset`.
+
+`/usr/local/sbin/wardian-apt` is a root-owned Python front end. It accepts only names matching `^[a-z0-9][a-z0-9.+-]*[a-z0-9]$`: no options, paths, `.deb` files or repos. A name that ends in `+` is refused too, so `g++` comes in through `build-essential`. It then starts `/usr/local/libexec/wardian-apt-worker` with `systemd-run` as a transient service, `wardian-apt-<random>`, waits for it, prints its log and exits with its code. The log and the exit code go to root-only files in `/run/wardian-apt`, and the caller sees the output only at the end.
+
+The worker does the work outside `sudo` and the caller's session. Once it has started, nothing the caller does reaches it: signals sent through `sudo` (Ubuntu 26.04's sudo-rs turns `SIGALRM` into `SIGKILL` for the command), a closed terminal, or output nobody reads. The worker:
+
+1. Runs from `/` with `umask 022`, takes an exclusive `flock` on `/run/wardian-apt.lock`, and gives every `apt-get` call a fixed environment (`PATH`, `HOME=/root`, `LC_ALL=C.UTF-8`, `DEBIAN_FRONTEND=noninteractive`), `-o DPkg::Lock::Timeout=120` and `-o APT::Cmd::Pattern-Only=true`. Without Pattern-Only, apt-get treats a name no package has, such as `a.*b`, as a regular expression and installs every package it matches.
+2. Runs `apt-get update`, then `apt-get -s install --no-install-recommends -- <names>`. If the simulated transaction would remove, upgrade, downgrade or reinstall an installed package, it exits 3 and says to fetch the work and recreate the sandbox.
+3. Runs `apt-get install -y --no-remove --no-install-recommends -o Dpkg::Options::=--force-confold -- <names>`.
+4. Whatever happened after it took the lock, checks that `nft -s list table inet wardian` matches `/var/lib/wardian/inet-wardian.nft` and that `/etc/nftables.conf` matches the SHA-256 in `/var/lib/wardian/nftables.conf.sha256`. On a mismatch, or if it can't check, it runs `systemctl poweroff --force` and exits 4. A plain `systemctl poweroff` goes through logind, which refuses while anyone holds a block inhibitor, root included. `--force` asks systemd directly, skipping the orderly stop of services. If that fails, `--force --force` calls `reboot(2)` to power off. The poweroff can stop the worker before it writes its exit code, so the caller may see exit 1 or its SSH connection drop instead of exit 4. The log line `Powering off.` is the sign that the poweroff started. If both calls fail, the worker says so and the sandbox keeps running.
+
+After a `wardian-apt` poweroff, or a failed one, don't start or use the sandbox again, not even to fetch. If `/etc/nftables.conf` changed and still loads, it boots with the changed firewall, and anything `agent` set to run at boot gets that firewall's egress. Delete it as in [Discarding a sandbox by hand](#discarding-a-sandbox-by-hand). Work you haven't fetched is lost.
+
+The sources are the ones provisioning configured: Ubuntu's archive and Anthropic's signed Claude Code repo. Background apt jobs, unattended-upgrades, snapd and packagekit are off, and provisioning runs a full upgrade before the firewall starts, because an nftables package upgrade can restart the service, and its `ExecStop` flushes every table, Lima's included. Claude Code is installed after that and held. So a new package rarely needs a newer version of one already installed. When it does, `wardian-apt` refuses.
 
 ## Agent CLIs
 
-Root owns both CLIs and their config, and neither can update itself. Once #26 opens egress, `agent` could install its own copy in its home, so "updates off" becomes a provisioning choice, not a control, and T08 is retired.
+Root owns both CLIs and their config, and the managed config turns their updates off. `agent` can still install its own copy in its home, so "updates off" is a provisioning choice, not a control.
 
 - Claude Code 2.1.311-1 comes from Anthropic's signed apt repo, stable channel, and is held with `dpkg --set-selections`. The repo's signing key, fingerprint `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE`, is kept in the repo at `ansible/roles/agent_clis/files/claude-code.asc`.
 - Codex 0.169.0 is the full `codex-package-aarch64-unknown-linux-musl.tar.gz`, checked against GitHub's published SHA-256 and unpacked into `/opt/codex/0.169.0`. `/usr/local/bin/codex` links to `bin/codex` there. The single `codex` binary isn't enough: Codex in T3 needs `codex-code-mode-host`.
 - ripgrep comes from apt.
 - `/etc/claude-code/managed-settings.json` turns off updates, nonessential traffic and claude.ai connectors. `/etc/codex/managed_config.toml` turns off the update check and ChatGPT apps. Both CLIs apply these files over `agent`'s own settings.
+- The same managed instructions go to both agents. They say to install system packages with `sudo wardian-apt`, use user-space installers (uv, pip, npm, mise, rustup) for the rest, commit only on `agent/<task>` branches, and that Docker is unavailable. Claude Code reads them from `/etc/claude-code/CLAUDE.md`. Codex 0.169.0 reads no system-wide `AGENTS.md`, so they go in `additional_developer_instructions` in `/etc/codex/requirements.toml`, which Codex sends as a managed developer message. The text is `ansible/roles/agent_clis/files/wardian-instructions.md`.
 - `/etc/profile.d/wardian-claude-token.sh` exports `CLAUDE_CODE_OAUTH_TOKEN` from `/etc/wardian/claude-token` for users who can read it, which means root and the `agent` group.
 
 ## Development
@@ -205,7 +225,10 @@ CircleCI runs `.circleci/config.yml` on Arm machine VMs. The `incus` job starts 
 3. installs a fake Claude token through `wardian-install-claude-token`, then runs the control tests with `--env ci`, through the same `python3 -I` command as `wardian test`
 4. appends a line that isn't nft syntax to `/etc/nftables.conf`, restarts the container, and fails unless it stops within 120 seconds
 
-The `mutation` job runs alongside it in its own container. It applies the playbook once, removes one control at a time, runs the control tests, and fails unless the tests for that control fail:
+The `mutation` job runs alongside it in its own container. It applies the playbook once, removes one control at a time from the live ruleset, and checks each change:
 
-1. `nft flush ruleset` removes the firewall. T02 (DNS) and T06 (direct egress) must fail. The job flushes the live ruleset rather than breaking `/etc/nftables.conf`, because a ruleset that fails to load powers the container off before the tests run. It then reloads `nftables.service` to put the ruleset back.
-2. (Replaced by #26, which removes the private-range drop and then the IPv6 drop.) Deleting the `allowlist` ACL and its `http_access deny` line from `/etc/squid/squid.conf`, then restarting Squid, removes the allowlist. T03 (a name off the allowlist) must fail.
+1. It deletes the private-range drop rule and runs `control_tests.py --env ci --only T06`, which must fail because `agent` and root reached `172.31.255.2` and the fixture's name. Then it reloads `nftables.service` to put the rule back.
+2. It deletes the IPv6 drop rule and runs T06 again, which must fail because `agent` and root reached `fd77:6172:6469::2`. Then it reloads again.
+3. It inserts an accept rule into `inet wardian`, holds a block shutdown inhibitor, which makes logind refuse a plain poweroff even for root, and holds `/run/wardian-apt.lock`, so the worker waits before it installs anything. As `agent`, it starts `sudo wardian-apt jq`, waits for the worker's unit, and sends `SIGALRM` to `sudo`. Root then kills any front end left and checks the worker is still running. Only then does it release the lock, and it fails unless the container stops within 120 seconds.
+
+It deletes rules from the live ruleset rather than breaking `/etc/nftables.conf`, because a ruleset that fails to load powers the container off before the tests run.

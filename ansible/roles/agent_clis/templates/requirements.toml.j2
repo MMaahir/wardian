@@ -1,0 +1,6 @@
+# Wardian: root-owned. Codex 0.169.0 reads no system-wide AGENTS.md. It sends
+# additional_developer_instructions from /etc/codex/requirements.toml as a
+# managed developer message. Requirements come only from managed sources, so
+# agent's ~/.codex files can't change it (codex-rs/config/src/
+# config_requirements.rs at rust-v0.169.0).
+additional_developer_instructions = {{ lookup('ansible.builtin.file', 'wardian-instructions.md') | to_json }}

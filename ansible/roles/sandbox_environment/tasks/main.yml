@@ -1,0 +1,22 @@
+# WARDIAN_SANDBOX=1 tells tools and agents they run in a sandbox. pam_env
+# reads /etc/environment for SSH logins and sudo, and login shells read
+# /etc/profile.d, so a session started either way has it. Lima writes its own
+# lines into /etc/environment, so this edits one line only.
+- name: Set WARDIAN_SANDBOX in /etc/environment
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    regexp: "^WARDIAN_SANDBOX="
+    line: WARDIAN_SANDBOX=1
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Set WARDIAN_SANDBOX in login shells
+  ansible.builtin.copy:
+    content: |
+      # Wardian: this machine is a Wardian sandbox.
+      export WARDIAN_SANDBOX=1
+    dest: /etc/profile.d/wardian-sandbox.sh
+    owner: root
+    group: root
+    mode: "0644"

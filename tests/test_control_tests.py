@@ -40,3 +40,14 @@ def test_a_deleted_test_fails_the_run(control_tests, monkeypatch, capsys, env):
     monkeypatch.setattr(control_tests, "TESTS", {"T91": lambda: (True, "ok")})
     assert control_tests.main(["--env", env]) == 1
     assert records(capsys)["T90"]["result"] == "fail"
+
+
+def test_only_runs_the_named_ids(control_tests, monkeypatch, capsys):
+    monkeypatch.setattr(
+        control_tests,
+        "TESTS",
+        {"T90": lambda: (True, "ok"), "T91": lambda: (False, "broken")},
+    )
+    assert control_tests.main(["--env", "lima", "--only", "T90"]) == 0
+    results = {id_: r["result"] for id_, r in records(capsys).items()}
+    assert results == {"T90": "pass", "T91": "skip"}

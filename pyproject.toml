@@ -29,6 +29,8 @@ extend-select = ["B", "I", "S", "UP"]
 # subprocess is the CLI's job, and the arguments are lists, never shell strings.
 "src/wardian/cli.py" = ["S603", "S607"]
 "ansible/roles/control_tests/files/control_tests.py" = ["S603"]
+# apt-get and systemd-run get package names that passed the name regex.
+"ansible/roles/wardian_apt/files/*.py" = ["S603"]
 "tests/*" = ["S101"]
 # The Lima tests run git on the Mac, as the docs tell the user to.
 "tests/test_lima_git.py" = ["S603", "S607"]

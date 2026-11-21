@@ -1,9 +1,25 @@
-# snapd refreshes snaps and packagekit fetches package lists, both as root
-# and both on their own schedule. Nothing in the sandbox needs either.
-- name: Remove snapd and packagekit
+# Background apt jobs, snapd and packagekit all change packages as root on
+# their own schedule. wardian-apt is the only way packages change after
+# provisioning, and it refuses any upgrade, so none of these may run.
+
+# Stops any apt job that is running now, then keeps the timers from starting
+# another. Masking works whether or not a unit is active.
+- name: Stop and mask the background apt jobs
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    masked: true
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+    - apt-daily.service
+    - apt-daily-upgrade.service
+
+- name: Remove snapd, packagekit and unattended-upgrades
   ansible.builtin.apt:
     name:
       - snapd
       - packagekit
+      - unattended-upgrades
     state: absent
     purge: true

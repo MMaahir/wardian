@@ -1,8 +1,8 @@
-# The probes the tests run as agent. resolvectl comes with systemd.
+# The probes' client. iproute2, util-linux and dpkg-deb, which T06 and T12
+# also use, come with Ubuntu.
 - name: Install the control test tools
   ansible.builtin.apt:
     name:
-      - bind9-dnsutils
       - curl
     state: present
     update_cache: true

@@ -57,7 +57,8 @@ Wardian is in development. The design changed on 2026-11-20 to give agents more 
 
 | Works on `main` | Coming |
 | --- | --- |
-| `create`, `test` and `destroy` | Open internet and `wardian-apt` ([#26](https://github.com/MMaahir/wardian/issues/26)). Until then, agents reach only their own APIs, through a proxy |
+| `create`, `test` and `destroy` | |
+| Open internet with private-range drops, and `sudo wardian-apt` | |
 | Git in and out, with a manual setup | `wardian push` and `wardian fetch` ([#28](https://github.com/MMaahir/wardian/issues/28)) |
 | Claude token from the Keychain | An `agent` SSH key and a T3 host block, and one agent per sandbox ([#27](https://github.com/MMaahir/wardian/issues/27)). T3 can't connect to an automated sandbox until this lands |
 
@@ -102,7 +103,7 @@ Run the agent's code and tests in the sandbox, not on your Mac, until you've rev
 
 To see connections the firewall blocked, run `limactl shell <name> sudo journalctl -k --grep wardian-drop`.
 
-[docs/cli.md](docs/cli.md) covers each command in detail, the control tests, the firewall rules and the CI jobs.
+[docs/cli.md](docs/cli.md) covers each command in detail, the control tests, the firewall rules, `wardian-apt` and the CI jobs.
 
 ## Development
 

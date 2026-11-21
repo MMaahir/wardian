@@ -1,0 +1,84 @@
+# wardian-apt, agent's only sudo grant, its worker, and the firewall snapshot
+# the worker checks after every install. This role runs after apt_upgrade and
+# after the nftables role has loaded the ruleset, so the snapshot is final.
+
+- name: Install wardian-apt
+  ansible.builtin.copy:
+    src: wardian_apt.py
+    dest: /usr/local/sbin/wardian-apt
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create the worker directory
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# wardian-apt starts it as a transient systemd service, so it runs outside
+# sudo and the caller's session.
+- name: Install the wardian-apt worker
+  ansible.builtin.copy:
+    src: wardian_apt_worker.py
+    dest: /usr/local/libexec/wardian-apt-worker
+    owner: root
+    group: root
+    mode: "0644"
+
+# sudo's default env_reset applies. visudo checks the file before it lands.
+- name: Let agent run wardian-apt as root
+  ansible.builtin.copy:
+    content: |
+      agent ALL=(root) NOPASSWD: /usr/local/sbin/wardian-apt
+    dest: /etc/sudoers.d/wardian-apt
+    owner: root
+    group: root
+    mode: "0440"
+    validate: visudo -cf %s
+
+# The check above reads only the new file. This one reads the whole policy.
+- name: Check the installed sudoers policy
+  ansible.builtin.command:
+    argv: [visudo, -c]
+  changed_when: false
+
+- name: Create the snapshot directory
+  ansible.builtin.file:
+    path: /var/lib/wardian
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# -s leaves out counter values, so the listing changes only when a rule,
+# set or chain does.
+- name: Read the loaded ruleset
+  ansible.builtin.command:
+    argv: [nft, -s, list, table, inet, wardian]
+  register: wardian_ruleset
+  changed_when: false
+
+- name: Record the loaded ruleset
+  ansible.builtin.copy:
+    content: "{{ wardian_ruleset.stdout }}\n"
+    dest: /var/lib/wardian/inet-wardian.nft
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Hash the ruleset file
+  ansible.builtin.stat:
+    path: /etc/nftables.conf
+    checksum_algorithm: sha256
+  register: nftables_conf
+
+- name: Record the ruleset file's hash
+  ansible.builtin.copy:
+    content: "{{ nftables_conf.stat.checksum }}\n"
+    dest: /var/lib/wardian/nftables.conf.sha256
+    owner: root
+    group: root
+    mode: "0644"

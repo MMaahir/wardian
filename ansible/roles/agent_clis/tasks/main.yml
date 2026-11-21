@@ -1,6 +1,8 @@
 # Claude Code and Codex, pinned to the versions the spike tested
 # (spike/phase-2-notes.md, "CLIs and T3 server"). Root owns every file, and
-# neither CLI can update itself: no update host is on Squid's allowlist.
+# the managed config turns updates off. With open egress agent could still
+# install its own copy in its home, so that is a provisioning choice, not a
+# control.
 
 # Anthropic's release signing key, fingerprint
 # 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE, kept in the repo so provisioning
@@ -130,6 +132,25 @@
       # ChatGPT apps (connectors).
       apps = false
     dest: /etc/codex/managed_config.toml
+    owner: root
+    group: root
+    mode: "0644"
+
+# The same instructions for both agents: wardian-apt, user-space installers,
+# agent/<task> branches, no Docker. Claude Code reads a managed CLAUDE.md from
+# /etc/claude-code on Linux, next to managed-settings.json.
+- name: Install Claude Code's managed instructions
+  ansible.builtin.copy:
+    src: wardian-instructions.md
+    dest: /etc/claude-code/CLAUDE.md
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install Codex's managed instructions
+  ansible.builtin.template:
+    src: requirements.toml.j2
+    dest: /etc/codex/requirements.toml
     owner: root
     group: root
     mode: "0644"

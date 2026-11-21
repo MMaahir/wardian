@@ -1,7 +1,7 @@
-# The sandbox's only resolver is wardian_resolver, and only Squid's user
-# and root may reach it (see the nftables role). systemd-resolved would be a
-# second path: a local stub on 127.0.0.53 and a D-Bus and varlink API that
-# any user can query.
+# The sandbox's only resolver is wardian_resolver. Every user may reach it on
+# port 53, and nftables drops every other private address (see the nftables
+# role). systemd-resolved would be a second path: a local stub on 127.0.0.53
+# and a D-Bus and varlink API that any user can query.
 
 # The file replaces the symlink to resolved's stub file, so resolution keeps
 # working for the tasks after resolved stops.
