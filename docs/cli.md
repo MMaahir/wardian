@@ -51,7 +51,7 @@ Codex logs in per sandbox. As `agent`, run `codex login --device-auth` and appro
 sudo -n /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env lima
 ```
 
-Root sets up T06's network fixture and, in CI, T13's fake `jq` package, reads the firewall's counters, and runs the T06 probes that must fail for root too. Every other probe runs as `agent` with an empty environment, through `runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin`.
+Root sets up T06's network fixture and, in CI, T13's fake `jq` package, reads the firewall's counters, runs the T06 probes that must fail for root too, and checks who owns T07's paths. T10 reads the token as `nobody`. Every other probe runs as `agent` with an empty environment, through `runuser -u agent -- env -i HOME=/home/agent PATH=/usr/bin:/bin`.
 
 It prints `PASS`, `FAIL` or `SKIP` for each threat ID and exits 1 if any test fails or none passes.
 
@@ -131,7 +131,7 @@ limactl delete --force wardian
 rm -f ~/.ssh/known_hosts.d/wardian
 ```
 
-**Any work in the sandbox that you haven't fetched is lost.** If the VM still boots, `limactl start wardian` and a fetch first.
+**Any work in the sandbox that you haven't fetched is lost.** After the boot-time poweroff, the VM can't boot until the ruleset loads, so the work can't be fetched. After a `wardian-apt` poweroff, don't start it to fetch: see [Packages](#packages).
 
 ## Control tests
 
@@ -154,7 +154,7 @@ T02 (no DNS), T03, T04, T05 (Squid) and T08 (no update host) were retired by #26
 
 ## Egress
 
-Every user in the guest reaches public IPv4 addresses directly, with DNS. No user reaches an IPv4 address in the `private4` set listed below, or any IPv6 address other than loopback, so nothing in the guest reaches the Mac or the LAN.
+Every user in the guest reaches public IPv4 addresses directly, with DNS. Apart from loopback and DNS to the resolver, no user reaches an IPv4 address in the `private4` set listed below, or any IPv6 address, so nothing in the guest reaches the Mac or the LAN.
 
 The nftables ruleset in `/etc/nftables.conf` replaces only `table inet wardian`, never Lima's `ip nat` table. The output chain's policy is drop. In order:
 
@@ -183,9 +183,9 @@ The worker does the work outside `sudo` and the caller's session. Once it has st
 1. Runs from `/` with `umask 022`, takes an exclusive `flock` on `/run/wardian-apt.lock`, and gives every `apt-get` call a fixed environment (`PATH`, `HOME=/root`, `LC_ALL=C.UTF-8`, `DEBIAN_FRONTEND=noninteractive`), `-o DPkg::Lock::Timeout=120` and `-o APT::Cmd::Pattern-Only=true`. Without Pattern-Only, apt-get treats a name no package has, such as `a.*b`, as a regular expression and installs every package it matches.
 2. Runs `apt-get update`, then `apt-get -s install --no-install-recommends -- <names>`. If the simulated transaction would remove, upgrade, downgrade or reinstall an installed package, it exits 3 and says to fetch the work and recreate the sandbox.
 3. Runs `apt-get install -y --no-remove --no-install-recommends -o Dpkg::Options::=--force-confold -- <names>`.
-4. Whatever happened after it took the lock, checks that `nft -s list table inet wardian` matches `/var/lib/wardian/inet-wardian.nft` and that `/etc/nftables.conf` matches the SHA-256 in `/var/lib/wardian/nftables.conf.sha256`. On a mismatch, or if it can't check, it runs `systemctl poweroff --force` and exits 4. A plain `systemctl poweroff` goes through logind, which refuses while anyone holds a block inhibitor, root included. `--force` asks systemd directly, skipping the orderly stop of services. If that fails, `--force --force` calls `reboot(2)`.
+4. Whatever happened after it took the lock, checks that `nft -s list table inet wardian` matches `/var/lib/wardian/inet-wardian.nft` and that `/etc/nftables.conf` matches the SHA-256 in `/var/lib/wardian/nftables.conf.sha256`. On a mismatch, or if it can't check, it runs `systemctl poweroff --force` and exits 4. A plain `systemctl poweroff` goes through logind, which refuses while anyone holds a block inhibitor, root included. `--force` asks systemd directly, skipping the orderly stop of services. If that fails, `--force --force` calls `reboot(2)` to power off. The poweroff can stop the worker before it writes its exit code, so the caller may see its SSH connection drop instead of exit 4.
 
-After a `wardian-apt` poweroff, don't go on using the sandbox. If `/etc/nftables.conf` changed and still loads, the sandbox boots with the changed firewall, and nothing checks it again until the next `wardian-apt`. Delete it (see [Discarding a sandbox by hand](#discarding-a-sandbox-by-hand)). To keep its work, start it, fetch, and delete it straight after.
+After a `wardian-apt` poweroff, don't start the sandbox again, not even to fetch. If `/etc/nftables.conf` changed and still loads, it boots with the changed firewall, and anything `agent` set to run at boot gets that firewall's egress. Delete it as in [Discarding a sandbox by hand](#discarding-a-sandbox-by-hand). Work you haven't fetched is lost.
 
 The sources are the ones provisioning configured: Ubuntu's archive and Anthropic's signed Claude Code repo. Background apt jobs, unattended-upgrades, snapd and packagekit are off, and provisioning runs a full upgrade before the firewall starts, because an nftables package upgrade can restart the service, and its `ExecStop` flushes every table, Lima's included. Claude Code is installed after that and held. So a new package rarely needs a newer version of one already installed. When it does, `wardian-apt` refuses.
 

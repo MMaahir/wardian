@@ -116,17 +116,20 @@ def power_off():
     A plain `systemctl poweroff` goes through logind, which refuses it while
     anyone holds a block inhibitor, root included. --force asks systemd's
     manager directly, past logind. --force --force, the fallback, calls
-    reboot(2) itself.
+    reboot(2) itself to power off.
     """
     for force in (["--force"], ["--force", "--force"]):
-        result = subprocess.run(
-            ["/usr/bin/systemctl", "poweroff", *force],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            env=ENV,
-        )
+        try:
+            result = subprocess.run(
+                ["/usr/bin/systemctl", "poweroff", *force],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                env=ENV,
+            )
+        except OSError:
+            continue
         if result.returncode == 0:
             return True
     return False

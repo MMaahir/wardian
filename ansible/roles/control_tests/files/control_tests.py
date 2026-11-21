@@ -324,9 +324,11 @@ def agent_cannot_write_clis_or_token():
                 f"{' '.join(result.stdout.split())} {result.stderr.strip()}"
             )
     # The owner can chmod a read-only file, so every path must be root's too.
+    # -H checks what a listed symlink points to, as -writable does.
+    not_root = ("!", "-user", "root")
     for probe in (
-        ("/usr/bin/find", *PROTECTED_TREES, "!", "-user", "root"),
-        ("/usr/bin/find", *PROTECTED_PATHS, "-maxdepth", "0", "!", "-user", "root"),
+        ("/usr/bin/find", "-H", *PROTECTED_TREES, *not_root),
+        ("/usr/bin/find", "-H", *PROTECTED_PATHS, "-maxdepth", "0", *not_root),
     ):
         result = run([*AS_ROOT, *probe])
         if result.returncode != 0 or result.stdout.strip():

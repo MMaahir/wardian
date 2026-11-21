@@ -120,7 +120,7 @@ def test_powers_off_even_when_stderr_is_broken(worker, monkeypatch, unchanged):
     assert calls == [["/usr/bin/systemctl", "poweroff", "--force"]]
 
 
-def test_poweroff_falls_back_to_reboot_syscall(worker, monkeypatch):
+def test_poweroff_falls_back_to_double_force(worker, monkeypatch):
     calls = []
 
     def systemctl(argv, **kwargs):
@@ -142,6 +142,20 @@ def test_poweroff_reports_failure(worker, monkeypatch):
         lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1),
     )
     assert worker.power_off() is False
+
+
+def test_poweroff_tries_again_when_systemctl_cannot_start(worker, monkeypatch):
+    calls = []
+
+    def systemctl(argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise OSError("no systemctl")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(worker.subprocess, "run", systemctl)
+    assert worker.power_off() is True
+    assert len(calls) == 2
 
 
 def test_waits_for_the_status_file(wardian_apt, tmp_path, monkeypatch):
