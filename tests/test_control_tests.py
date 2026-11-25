@@ -51,3 +51,27 @@ def test_only_runs_the_named_ids(control_tests, monkeypatch, capsys):
     assert control_tests.main(["--env", "lima", "--only", "T90"]) == 0
     results = {id_: r["result"] for id_, r in records(capsys).items()}
     assert results == {"T90": "pass", "T91": "skip"}
+
+
+@pytest.mark.parametrize("text", ["", "both\n", "Claude\n"])
+def test_an_unknown_agent_mode_is_an_error(control_tests, tmp_path, monkeypatch, text):
+    mode_file = tmp_path / "agent-mode"
+    mode_file.write_text(text)
+    monkeypatch.setattr(control_tests, "MODE_FILE", str(mode_file))
+    with pytest.raises(ValueError, match="not claude or codex"):
+        control_tests.agent_mode()
+
+
+def test_t10_fails_when_a_codex_sandbox_has_a_token(
+    control_tests, tmp_path, monkeypatch
+):
+    (tmp_path / "agent-mode").write_text("codex\n")
+    monkeypatch.setattr(control_tests, "MODE_FILE", str(tmp_path / "agent-mode"))
+    monkeypatch.setattr(control_tests, "TOKEN", str(tmp_path / "claude-token"))
+    assert control_tests.others_cannot_read_token()[0] is True
+
+    (tmp_path / "claude-token").write_text("sk-ant-oat01-x")
+    assert control_tests.others_cannot_read_token() == (
+        False,
+        f"Codex mode, but {tmp_path / 'claude-token'} exists",
+    )

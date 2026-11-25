@@ -39,16 +39,19 @@ THREAT_IDS = {
     "T06": ("both", "nftables drops private IPv4 and IPv6 for agent and root"),
     "T07": ("both", "agent can't write the agent CLIs, their config or the token"),
     "T09": ("both", "agent's environment has no proxy, cloud or AI API variables"),
-    "T10": ("both", "other users can't read the Claude token"),
+    "T10": ("both", "only agent can read the Claude token, and only in Claude mode"),
     "T11": ("both", "agent downloads from a public package registry directly"),
     "T12": ("both", "wardian-apt installs new packages and refuses the rest"),
     "T13": ("ci", "wardian-apt refuses to upgrade an installed package"),
+    "T14": ("both", "SSH gives agent only a local forward to T3's port"),
 }
 for _threat_id, (_env, _) in THREAT_IDS.items():
     if _env not in ("ci", "lima", "both"):
         raise ValueError(f"{_threat_id}: unknown environment {_env!r}")
 
 TESTS = {}
+# Set by main: ci or lima.
+ENV = None
 
 PATH = "PATH=/usr/bin:/bin"
 AS_AGENT = [
@@ -80,6 +83,20 @@ while True:
 # T11: a package index any project might download from.
 REGISTRY_URL = "https://pypi.org/simple/pip/"
 TOKEN = "/etc/wardian/claude-token"  # noqa: S105 - a path, not a token
+# claude or codex: which agent's login the sandbox holds.
+MODE_FILE = "/etc/wardian/agent-mode"
+SSHD_AGENT_CONFIG = "/etc/ssh/sshd_config.d/50-wardian-agent.conf"
+LIMA_ADMIN_UID = 1000
+# sshd -T prints these for agent. Lowercase, as sshd prints them.
+SSHD_AGENT_SETTINGS = {
+    "allowtcpforwarding": "local",
+    "permitopen": "127.0.0.1:3773",
+    "permitlisten": "none",
+    "allowagentforwarding": "no",
+    "allowstreamlocalforwarding": "no",
+    "x11forwarding": "no",
+    "permittunnel": "no",
+}
 # What agent must not change: the agent CLIs, their managed config and
 # instructions, the token, wardian-apt and its firewall snapshot, and the
 # files that set agent's environment. Each tree is checked to every depth,
@@ -110,7 +127,9 @@ PROTECTED_PATHS = (
     "/etc/profile.d/wardian-claude-token.sh",
     "/etc/profile.d/wardian-sandbox.sh",
     "/etc/environment",
-    TOKEN,
+    MODE_FILE,
+    "/etc/ssh/sshd_config.d",
+    SSHD_AGENT_CONFIG,
 )
 # AWS, Google (including Gemini), Cloud SDK, Anthropic and OpenAI API variables.
 # CLAUDE_CODE_OAUTH_TOKEN is allowed: it is the sandbox's own Claude token.
@@ -186,6 +205,14 @@ def counter(name):
         if "counter" in item:
             return item["counter"]["packets"]
     raise ValueError(f"nft printed no counter named {name}")
+
+
+def agent_mode():
+    """The agent mode provisioning recorded: claude or codex."""
+    mode = Path(MODE_FILE).read_text().strip()
+    if mode not in ("claude", "codex"):
+        raise ValueError(f"{MODE_FILE} holds {mode!r}, not claude or codex")
+    return mode
 
 
 @control("T01")
@@ -306,8 +333,9 @@ def nftables_drops_private_addresses():
 
 @control("T07")
 def agent_cannot_write_clis_or_token():
+    paths = PROTECTED_PATHS + ((TOKEN,) if agent_mode() == "claude" else ())
     # exists follows the codex symlink, so a dangling link counts as missing.
-    missing = [p for p in (*PROTECTED_TREES, *PROTECTED_PATHS) if not os.path.exists(p)]
+    missing = [p for p in (*PROTECTED_TREES, *paths) if not os.path.exists(p)]
     if missing:
         return False, "missing: " + ", ".join(missing)
     # -writable asks access(2), so the probe writes nothing. find follows the
@@ -315,7 +343,7 @@ def agent_cannot_write_clis_or_token():
     failures = []
     for probe in (
         ("find", *PROTECTED_TREES, "-writable"),
-        ("find", *PROTECTED_PATHS, "-maxdepth", "0", "-writable"),
+        ("find", *paths, "-maxdepth", "0", "-writable"),
     ):
         result = as_agent(*probe)
         if result.returncode != 0 or result.stdout.strip():
@@ -328,7 +356,7 @@ def agent_cannot_write_clis_or_token():
     not_root = ("!", "-user", "root")
     for probe in (
         ("/usr/bin/find", "-H", *PROTECTED_TREES, *not_root),
-        ("/usr/bin/find", "-H", *PROTECTED_PATHS, "-maxdepth", "0", *not_root),
+        ("/usr/bin/find", "-H", *paths, "-maxdepth", "0", *not_root),
     ):
         result = run([*AS_ROOT, *probe])
         if result.returncode != 0 or result.stdout.strip():
@@ -338,7 +366,7 @@ def agent_cannot_write_clis_or_token():
             )
     if failures:
         return False, "; ".join(failures)
-    count = len(PROTECTED_TREES) + len(PROTECTED_PATHS)
+    count = len(PROTECTED_TREES) + len(paths)
     return True, f"none of {count} paths is writable by agent, and root owns them"
 
 
@@ -352,7 +380,10 @@ def agent_environment_has_no_api_variables():
     # shell reads /etc/profile. su --login runs PAM like an SSH login and then
     # runs env as the "shell". bash reads /etc/profile but not agent's own
     # dotfiles. Each probe must find WARDIAN_SANDBOX=1, which both files set,
-    # so a probe that read nothing can't pass.
+    # so a probe that read nothing can't pass. The token is exported from
+    # /etc/profile.d, so only that probe has it, and only in Claude mode.
+    claude = agent_mode() == "claude"
+    token = ("CLAUDE_CODE_OAUTH_TOKEN",) if claude else ()
     pam = run(["/usr/bin/su", "--login", "--shell", "/usr/bin/env", "agent"])
     profile = as_agent(
         "bash", "--noprofile", "--norc", "-c", ". /etc/profile && exec env"
@@ -361,7 +392,7 @@ def agent_environment_has_no_api_variables():
     names = set()
     for label, result, expected in (
         ("su --login", pam, ("WARDIAN_SANDBOX",)),
-        ("/etc/profile", profile, ("WARDIAN_SANDBOX", "CLAUDE_CODE_OAUTH_TOKEN")),
+        ("/etc/profile", profile, ("WARDIAN_SANDBOX", *token)),
     ):
         found = variables(result.stdout)
         names |= found.keys()
@@ -378,15 +409,22 @@ def agent_environment_has_no_api_variables():
         for n in names
         if n.startswith(FORBIDDEN_ENV_PREFIXES) or n.lower() in PROXY_VARIABLES
     )
+    if not claude and "CLAUDE_CODE_OAUTH_TOKEN" in names:
+        forbidden.append("CLAUDE_CODE_OAUTH_TOKEN in Codex mode")
     if forbidden:
         failures.append("forbidden variables: " + ", ".join(forbidden))
     if failures:
         return False, "; ".join(failures)
-    return True, f"{len(names)} variables, none forbidden"
+    mode = "with" if claude else "without"
+    return True, f"{len(names)} variables, none forbidden, {mode} the Claude token"
 
 
 @control("T10")
 def others_cannot_read_token():
+    if agent_mode() == "codex":
+        if os.path.lexists(TOKEN):
+            return False, f"Codex mode, but {TOKEN} exists"
+        return True, f"Codex mode, and there is no {TOKEN}"
     info = os.stat(TOKEN)
     group = grp.getgrgid(info.st_gid)
     failures = []
@@ -517,6 +555,43 @@ def wardian_apt_refuses_upgrades():
     )
 
 
+def sshd_settings(user):
+    """sshd's effective settings for a login by user from the Mac's side."""
+    spec = f"user={user},host=wardian-test,addr=192.168.5.2,laddr=192.168.5.15,lport=22"
+    result = run(["/usr/sbin/sshd", "-T", "-C", spec], timeout=30, check=True)
+    settings = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        settings.setdefault(key, value)
+    return settings
+
+
+@control("T14")
+def sshd_limits_agent():
+    failures = []
+    result = run(["/usr/sbin/sshd", "-t"], timeout=30)
+    if result.returncode != 0:
+        failures.append(f"sshd -t exited {result.returncode}: {result.stderr.strip()}")
+    agent = sshd_settings("agent")
+    for key, expected in SSHD_AGENT_SETTINGS.items():
+        if agent.get(key) != expected:
+            failures.append(f"for agent, {key} is {agent.get(key)!r}, not {expected!r}")
+    # The block is for agent only: the admin user still gets sshd's defaults,
+    # so the Match line is what limits agent. Lima's admin user is UID 1000;
+    # in CI, Ansible connects as root.
+    admin = pwd.getpwuid(LIMA_ADMIN_UID).pw_name if ENV == "lima" else "root"
+    forwarding = sshd_settings(admin).get("allowtcpforwarding")
+    if forwarding != "yes":
+        failures.append(
+            f"for {admin}, allowtcpforwarding is {forwarding!r}, not 'yes', so "
+            "the test can't tell the Match block applies"
+        )
+    if failures:
+        return False, "; ".join(failures)
+    settings = ", ".join(f"{k} {v}" for k, v in SSHD_AGENT_SETTINGS.items())
+    return True, f"for agent: {settings}; {admin} keeps allowtcpforwarding yes"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", required=True, choices=("ci", "lima"))
@@ -527,6 +602,8 @@ def main(argv=None):
         help="run only this threat ID; repeat for more",
     )
     args = parser.parse_args(argv)
+    global ENV  # the tests take no arguments
+    ENV = args.env
 
     if os.geteuid() != 0:
         print("control_tests.py: run this as root", file=sys.stderr)

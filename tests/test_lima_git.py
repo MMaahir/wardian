@@ -16,9 +16,12 @@ import pytest
 from wardian import cli
 
 NAME = os.environ.get("WARDIAN_LIMA_SANDBOX", "")
-pytestmark = pytest.mark.skipif(
-    not NAME, reason="set WARDIAN_LIMA_SANDBOX to a sandbox made by wardian create"
-)
+pytestmark = [
+    pytest.mark.lima,
+    pytest.mark.skipif(
+        not NAME, reason="set WARDIAN_LIMA_SANDBOX to a sandbox made by wardian create"
+    ),
+]
 
 # The fetch from docs/cli.md, without the output filter.
 FETCH = [

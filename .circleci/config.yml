@@ -78,21 +78,31 @@ commands:
               "$CI_TEMP/id_ed25519.pub" "$CONTAINER/root/.ssh/authorized_keys"
             host_key=$(sudo incus exec "$CONTAINER" -- cat /etc/ssh/ssh_host_ed25519_key.pub)
             echo "$CONTAINER_IP $host_key" > "$CI_TEMP/known_hosts"
+            # The key wardian create would make for agent.
+            ssh-keygen -q -t ed25519 -N '' -C agent@ci -f "$CI_TEMP/agent_ed25519"
 
   provision:
     description: Apply the playbook to the container. The output goes to $CI_TEMP/provision.log.
+    parameters:
+      mode:
+        description: The agent mode, claude or codex.
+        type: enum
+        enum: [claude, codex]
     steps:
       - run:
-          name: Provision
+          name: Provision in << parameters.mode >> mode
           environment:
             ANSIBLE_CONFIG: ansible/ansible.cfg
           command: |
+            jq -n --arg resolver "$RESOLVER" --arg key "$(cat "$CI_TEMP/agent_ed25519.pub")" \
+              '{wardian_resolver: $resolver, wardian_agent_mode: "<< parameters.mode >>", wardian_agent_key: $key}' \
+              > "$CI_TEMP/extra-vars.json"
             uv run --locked ansible-playbook \
               --inventory "$CONTAINER_IP," \
               --user root \
               --private-key "$CI_TEMP/id_ed25519" \
               --ssh-common-args "-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$CI_TEMP/known_hosts" \
-              --extra-vars "wardian_resolver=$RESOLVER" \
+              --extra-vars "@$CI_TEMP/extra-vars.json" \
               ansible/playbook.yml \
               | tee "$CI_TEMP/provision.log"
 
@@ -102,8 +112,10 @@ jobs:
     steps:
       - checkout
       - start-container
-      - provision
-      - provision
+      - provision:
+          mode: codex
+      - provision:
+          mode: codex
 
       - run:
           name: Require no changes the second time
@@ -124,6 +136,17 @@ jobs:
             done
             sudo incus exec "$CONTAINER" -- systemctl is-active nftables.service
 
+      # Codex mode first: it has no token, and switching to Claude mode only
+      # adds one.
+      - run:
+          name: Run the control tests in Codex mode
+          command: |
+            sudo incus exec "$CONTAINER" -- \
+              /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci
+
+      - provision:
+          mode: claude
+
       # The same script `wardian create` pipes the Keychain token into. The
       # token tests check the file it writes.
       - run:
@@ -133,7 +156,7 @@ jobs:
               | sudo incus exec "$CONTAINER" -- /usr/local/sbin/wardian-install-claude-token
 
       - run:
-          name: Run the control tests
+          name: Run the control tests in Claude mode
           command: |
             sudo incus exec "$CONTAINER" -- \
               /usr/bin/python3 -I /usr/local/lib/wardian/control_tests.py --env ci
@@ -162,7 +185,8 @@ jobs:
     steps:
       - checkout
       - start-container
-      - provision
+      - provision:
+          mode: codex
 
       # Each step deletes one rule from the live ruleset, so nftables.service
       # stays active. Breaking /etc/nftables.conf and restarting the service

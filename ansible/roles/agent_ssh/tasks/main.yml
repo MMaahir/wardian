@@ -1,0 +1,16 @@
+# sshd keeps the first value it reads for each option, and Ubuntu's
+# sshd_config includes sshd_config.d before its own settings, so this block
+# wins for agent. The control tests check the result with sshd -T.
+- name: Limit what SSH gives agent
+  ansible.builtin.copy:
+    src: 50-wardian-agent.conf
+    dest: /etc/ssh/sshd_config.d/50-wardian-agent.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload sshd
+
+- name: Check the sshd config
+  ansible.builtin.command:
+    argv: [/usr/sbin/sshd, -t]
+  changed_when: false

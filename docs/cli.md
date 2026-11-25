@@ -2,25 +2,26 @@
 
 `wardian` creates, tests and destroys a sandbox: a Lima VM built from `lima/wardian.yaml` and provisioned by `ansible/playbook.yml`. So far the playbook:
 
-- creates the unprivileged `agent` user
+- creates the unprivileged `agent` user, with the sandbox's own SSH key as its only authorized key
 - creates `/home/agent/project`, the git repo the agents work in
 - stops and masks the background apt jobs, and removes snapd, packagekit and unattended-upgrades
 - writes a static `/etc/resolv.conf` and masks systemd-resolved
 - upgrades every installed package, before the firewall starts
 - installs the nftables ruleset, with a drop-in that powers the guest off if the ruleset fails to load
+- limits what an SSH login as `agent` gets to one local forward, to T3's port
 - installs Claude Code, Codex and ripgrep, with root-owned managed settings and instructions for both CLIs, and holds Claude Code at its version
 - installs `wardian-apt`, its sudoers line, and a snapshot of the firewall it checks
-- creates `/etc/wardian` for the Claude token, the script that installs the token, and the login profile script that exports it
+- records the agent mode in `/etc/wardian/agent-mode`, and creates `/etc/wardian` for the Claude token, the script that installs the token, and the login profile script that exports it
 - sets `WARDIAN_SANDBOX=1` in `/etc/environment` and `/etc/profile.d/wardian-sandbox.sh`
 - installs the control tests
 
-> **Being re-scoped.** Issue #1 changed on 2026-11-20 (see [ADR 0001](adr/0001-open-egress-instead-of-an-allowlist.md)). #26 replaced Squid and the allowlist with open egress and `wardian-apt`. `agent` gets its own SSH key, a T3 host block and one login per sandbox (#27). `wardian push` and `wardian fetch` replace the manual git setup (#28). This page describes the code on `main`, and each of those tickets updates it as it lands. Sections marked "Replaced by" describe behaviour that is going away.
+> **Being re-scoped.** Issue #1 changed on 2026-11-20 (see [ADR 0001](adr/0001-open-egress-instead-of-an-allowlist.md)). #26 replaced Squid and the allowlist with open egress and `wardian-apt`. #27 gave `agent` its own SSH key, a T3 host block and one login per sandbox. `wardian push` and `wardian fetch` replace the manual git setup (#28). This page describes the code on `main`. Sections marked "Replaced by" describe behaviour that is going away.
 
 ## Requirements
 
 - macOS on Apple silicon with Lima 2.3 (`brew install lima`)
 - uv. It installs Python 3.13, ruff, pytest and ansible-core into `.venv` from `uv.lock`.
-- A Claude token in your login Keychain, under the service name `wardian-claude-token`. Make one with `claude setup-token`, then store it with `security add-generic-password -U -a "$USER" -s wardian-claude-token -w`. With `-w` last and no value, `security` prompts for the token, so it never lands in your shell history.
+- For a Claude sandbox, a Claude token in your login Keychain, under the service name `wardian-claude-token`. A Codex sandbox doesn't need it. Make one with `claude setup-token`, then store it with `security add-generic-password -U -a "$USER" -s wardian-claude-token -w`. With `-w` last and no value, `security` prompts for the token, so it never lands in your shell history.
 
 Run the CLI with `uv run` from the repo, so `ansible-playbook` from `.venv` is on `PATH`. The CLI itself uses only the Python standard library.
 
@@ -29,21 +30,24 @@ Run the CLI with `uv run` from the repo, so `ansible-playbook` from `.venv` is o
 Each command takes an optional sandbox name, which defaults to `wardian`. A name is 1 to 31 characters: a lowercase letter, then lowercase letters, digits or `-`. Only one sandbox runs at a time, because the template fixes the SSH port at 60022. You can keep stopped sandboxes, one per project, and start the one you need with `limactl start <name>`.
 
 ```sh
-uv run wardian create    # build, check, boot and provision
+uv run wardian create --agent claude   # build, check, boot and provision
 uv run wardian test      # run the control tests and report each threat ID
 uv run wardian destroy --repo ~/Developer/myproject   # check for unfetched work, then delete
 ```
 
-`create`:
+`create --agent claude|codex` needs `--agent`. The sandbox gets the login of that agent only. Both CLIs are installed either way.
 
 1. Refuses if `$LIMA_HOME/_config/default.yaml`, `override.yaml` or `base.yaml` exists (`$LIMA_HOME` defaults to `~/.lima`). Lima merges those files into every instance.
-2. Reads the Claude token from the Keychain with `security find-generic-password -s wardian-claude-token -w`, and refuses unless it starts with `sk-ant-oat`. The token stays in the CLI's memory and is never written to a file on the Mac. A missing token stops `create` before it builds a VM.
+2. In Claude mode, reads the Claude token from the Keychain with `security find-generic-password -s wardian-claude-token -w`, and refuses unless it starts with `sk-ant-oat`. The token stays in the CLI's memory and is never written to a file on the Mac. A missing token stops `create` before it builds a VM. Codex mode skips this step.
 3. Runs `limactl create --tty=false` without starting the VM, then checks Lima's merged config from `limactl list --json`. It refuses if `mounts`, `networks` or `provision` is set, if `networkOpts.hostLoopback`, `propagateProxyEnv`, `ssh.forwardAgent` or `ssh.overVsock` is anything but false, if `portForwards` is anything but the template's catch-all ignore rule, or if Lima's admin user would be named `agent`. A refused VM never boots, and `create` deletes it.
-4. Starts the VM, reads its ed25519 host key with `limactl shell`, and writes `~/.ssh/known_hosts.d/<name>`. The entry is keyed by the host alias `<name>`, not by `127.0.0.1:60022`. Lima itself pins the key the guest presents on first boot, so the trust starts there. From this file on, every Wardian SSH connection checks the key strictly.
-5. Runs the playbook over SSH as Lima's admin user, with `wardian_resolver` set to Lima's resolver, 192.168.5.2. SSH uses `StrictHostKeyChecking=yes` against that file, no reused connection, and `-F /dev/null`, so your `~/.ssh/config` doesn't apply. `ANSIBLE_CONFIG` points at `ansible/ansible.cfg`, so an `ansible.cfg` in the directory you run from is never read.
-6. Pipes the token over the same SSH connection settings into `sudo -n /usr/local/sbin/wardian-install-claude-token`. The script writes it to a temporary file in `/etc/wardian`, sets it to `root:agent 0640`, and renames it to `/etc/wardian/claude-token`, so a failed copy never replaces a good token.
+4. Generates a new ed25519 key for `agent` at `~/.wardian/<name>/agent_ed25519`, mode 0600, in a 0700 directory, replacing any key left there by an earlier sandbox of the same name.
+5. Starts the VM, reads its ed25519 host key with `limactl shell`, and writes `~/.ssh/known_hosts.d/<name>`. The entry is keyed by the host alias `<name>`, not by `127.0.0.1:60022`. Lima itself pins the key the guest presents on first boot, so the trust starts there. From this file on, every Wardian SSH connection checks the key strictly.
+6. Runs the playbook over SSH as Lima's admin user, with `wardian_resolver` set to Lima's resolver, 192.168.5.2, `wardian_agent_mode` set to the agent, and `wardian_agent_key` set to the public half of the agent key. SSH uses `StrictHostKeyChecking=yes` against that file, no reused connection, and `-F /dev/null`, so your `~/.ssh/config` doesn't apply. `ANSIBLE_CONFIG` points at `ansible/ansible.cfg`, so an `ansible.cfg` in the directory you run from is never read.
+7. In Claude mode, pipes the token over the same SSH connection settings into `sudo -n /usr/local/sbin/wardian-install-claude-token`. The script writes it to a temporary file in `/etc/wardian`, sets it to `root:agent 0640`, and renames it to `/etc/wardian/claude-token`, so a failed copy never replaces a good token.
+8. Writes the `wardian-<name>` host block to `~/.wardian/ssh_config` and prints the line that includes it. See [SSH as agent](#ssh-as-agent).
+9. Prints two notices. `html_render` pages from the agent run in the T3 app on your Mac, and while the thread is open they can make your Mac send requests to its own localhost and LAN. Wardian can't stop that. And the agent's account must have no connectors linked, and for Codex no Codex Cloud environments or tasks. Wardian can't check either.
 
-Codex logs in per sandbox. As `agent`, run `codex login --device-auth` and approve the code in a browser.
+Codex logs in per sandbox, with device auth. After adding the `Include` line, run `ssh -t wardian-<name> codex login --device-auth` and approve the code in a browser.
 
 `test` repeats the `_config` check, then connects the same way and runs the control tests as root:
 
@@ -55,7 +59,7 @@ Root sets up T06's network fixture and, in CI, T13's fake `jq` package, reads th
 
 It prints `PASS`, `FAIL` or `SKIP` for each threat ID and exits 1 if any test fails or none passes.
 
-`destroy` runs `limactl delete --force` and removes the known-hosts file. It refuses to delete a Lima instance that `create` didn't make: `create` writes a `wardian-sandbox` file into the instance directory right after `limactl create`. It also refuses, naming each reason, while the sandbox's repo holds work the Mac doesn't have:
+`destroy` runs `limactl delete --force`, removes the known-hosts file and the agent key, and removes the sandbox's host block from `~/.wardian/ssh_config`. It refuses to delete a Lima instance that `create` didn't make: `create` writes a `wardian-sandbox` file into the instance directory right after `limactl create`. It also refuses, naming each reason, while the sandbox's repo holds work the Mac doesn't have:
 
 - uncommitted changes to tracked files, including a submodule with changes
 - untracked files (files the repo's `.gitignore` ignores don't count)
@@ -122,14 +126,61 @@ The agents commit on `agent/<task>` branches. Fetch them into `sandbox/agent/*`:
 
 Read the diff, for example `git diff main sandbox/agent/<task>`, and merge the commit you read by its SHA, not by the branch name. Run the agent's code in the sandbox, not on the Mac.
 
+## SSH as agent
+
+T3 connects to the sandbox as `agent`, through a host block `create` writes to `~/.wardian/ssh_config`:
+
+```
+# BEGIN wardian-wardian
+Host wardian-wardian
+    HostName 127.0.0.1
+    Port 60022
+    User agent
+    IdentityFile "/Users/you/.wardian/wardian/agent_ed25519"
+    IdentitiesOnly yes
+    ForwardAgent no
+    ControlMaster no
+    ControlPath none
+    StrictHostKeyChecking yes
+    HostKeyAlias wardian
+    UserKnownHostsFile "/Users/you/.ssh/known_hosts.d/wardian"
+    GlobalKnownHostsFile /dev/null
+# END wardian-wardian
+```
+
+The options after `IdentityFile` are the ones the CLI itself uses, without `BatchMode`. `create` replaces only the block between its own markers, so blocks for other sandboxes stay, and `destroy` removes it. Add this line once, at the top of `~/.ssh/config`, so ssh reads it before any `Host *` block (ssh keeps the first value it reads for each option):
+
+```
+Include ~/.wardian/ssh_config
+```
+
+Then in T3, add a remote environment with the host `wardian-<name>`.
+
+The key is the sandbox's own: `create` makes a new one for each sandbox, and provisioning installs its public half as the only line of `/home/agent/.ssh/authorized_keys`. `agent` owns that file and can add keys to it, which gives it nothing, because sshd limits every `agent` login the same way. `/etc/ssh/sshd_config.d/50-wardian-agent.conf` holds:
+
+```
+Match User agent
+	AllowTcpForwarding local
+	PermitOpen 127.0.0.1:3773
+	PermitListen none
+	AllowAgentForwarding no
+	AllowStreamLocalForwarding no
+	X11Forwarding no
+	PermitTunnel no
+```
+
+So an `agent` login gets a shell and one local forward, to T3's port in the guest, and nothing else: no remote forwards, no forwards to other ports or hosts, no agent or Unix socket forwarding, no X11 and no tunnels. sshd opens the forwarded connection as `agent`, so the firewall limits it too. Ubuntu's `sshd_config` includes `sshd_config.d` before its own settings, and sshd keeps the first value it reads, so this block wins for `agent`. Lima's admin user keeps sshd's defaults.
+
 ## Discarding a sandbox by hand
 
 `destroy` can't check a sandbox it can't reach, such as one the firewall-failure poweroff stopped, and it refuses. To delete one anyway:
 
 ```sh
 limactl delete --force wardian
-rm -f ~/.ssh/known_hosts.d/wardian
+uv run wardian destroy wardian
 ```
+
+With the instance gone, `destroy` only removes the known-hosts file, the agent key and the host block.
 
 **Any work in the sandbox that you haven't fetched is lost.** After the boot-time poweroff, the VM can't boot until the ruleset loads, so the work can't be fetched. After a `wardian-apt` poweroff, don't start it to fetch: see [Packages](#packages).
 
@@ -141,12 +192,16 @@ rm -f ~/.ssh/known_hosts.d/wardian
 |---|---|---|
 | T01 | both | `sudo -n -l` as `agent` succeeds and lists exactly one grant, `(root) NOPASSWD: /usr/local/sbin/wardian-apt`. Any other grant fails the test. |
 | T06 | both | Neither `agent` nor root can reach the fixture, and the drop counters go up. The fixture is a listener on port 8080 in its own network namespace, behind a veth pair, at `172.31.255.2` and `fd77:6172:6469::2`. The probes are curl to each address, and to `wardian-fixture.test`, a name that resolves to `172.31.255.2` through an `/etc/hosts` mounted in a private mount namespace. Before the probes, the test checks the fixture answers inside its own namespace. Each probe must fail and raise `private4_dropped` or `ipv6_dropped`. |
-| T07 | both | `find -writable` as `agent` finds nothing in `/opt/codex`, `/etc/claude-code`, `/etc/codex`, `/etc/wardian` or `/var/lib/wardian`, and none of `/usr/bin/claude`, `/usr/local/bin/codex`, the managed config and instruction files, the token, the install script, `wardian-apt`, its worker in `/usr/local/libexec`, `/etc/sudoers.d`, the two login profile scripts, `/etc/environment` or their directories is writable. Root must own every one of these paths, checked at the target for a symlink, and everything in the five directories, since an owner can `chmod` a read-only file. Every path must exist. `agent` can't stat files in `/etc/sudoers.d`, which is `0750` on Ubuntu, so T01 checks the grant instead. |
-| T09 | both | `agent`'s login environment has no proxy variable, in either case, and no variable starting with `AWS_`, `GOOGLE_`, `GEMINI_`, `GCLOUD_`, `CLOUDSDK_`, `ANTHROPIC_` or `OPENAI_`. One probe is `su --login` with `env` as the shell, which runs PAM and so reads `/etc/environment`. The other sources `/etc/profile` without `agent`'s dotfiles. Each must find `WARDIAN_SANDBOX=1`, so a probe that read nothing fails, and the second must also find `CLAUDE_CODE_OAUTH_TOKEN`. #27 makes the token check follow the agent mode. |
-| T10 | both | `/etc/wardian/claude-token` is `root:agent 0640`, `agent` is the only member of the `agent` group, and `cat` of the token as `nobody` gets `Permission denied`. #27 makes the test follow the agent mode. |
+| T07 | both | `find -writable` as `agent` finds nothing in `/opt/codex`, `/etc/claude-code`, `/etc/codex`, `/etc/wardian` or `/var/lib/wardian`, and none of `/usr/bin/claude`, `/usr/local/bin/codex`, the managed config and instruction files, the agent mode file, in Claude mode the token, the install script, `wardian-apt`, its worker in `/usr/local/libexec`, `/etc/sudoers.d`, the two login profile scripts, `/etc/environment`, the agent's sshd config or their directories is writable. Root must own every one of these paths, checked at the target for a symlink, and everything in the five directories, since an owner can `chmod` a read-only file. Every path must exist. `agent` can't stat files in `/etc/sudoers.d`, which is `0750` on Ubuntu, so T01 checks the grant instead. |
+| T09 | both | `agent`'s login environment has no proxy variable, in either case, and no variable starting with `AWS_`, `GOOGLE_`, `GEMINI_`, `GCLOUD_`, `CLOUDSDK_`, `ANTHROPIC_` or `OPENAI_`. One probe is `su --login` with `env` as the shell, which runs PAM and so reads `/etc/environment`. The other sources `/etc/profile` without `agent`'s dotfiles. Each must find `WARDIAN_SANDBOX=1`, so a probe that read nothing fails. In Claude mode the second must also find `CLAUDE_CODE_OAUTH_TOKEN`. In Codex mode neither may have it. |
+| T10 | both | In Claude mode, `/etc/wardian/claude-token` is `root:agent 0640`, `agent` is the only member of the `agent` group, and `cat` of the token as `nobody` gets `Permission denied`. In Codex mode, the token file doesn't exist. |
 | T11 | both | As `agent`, with no proxy variables, curl downloads `https://pypi.org/simple/pip/` directly and gets HTTP 200. |
 | T12 | both | As `agent`, `sudo -n wardian-apt` exits 2 for options (`-y`, `--reinstall`, `-o...`), paths, `.deb` files, names ending in `+` or `-`, a stray `--` and no names. `wardian-apt z.h`, a valid name that apt-get would otherwise treat as a regular expression matching `zsh`, fails with `Unable to locate package`. `wardian-apt jq` exits 0 and leaves `jq` installed. If `jq` is already installed, the test leaves it alone, because once the archive has a newer `jq`, `wardian-apt` refuses the upgrade. The test never removes a package. |
 | T13 | ci | With a fake `jq` 0~wardian installed through `dpkg`, `wardian-apt jq` would upgrade it, so it exits 3 and says to recreate the sandbox. The test then purges `jq`, which is why it runs only in CI. |
+
+| T14 | both | `sshd -t` passes. `sshd -T -C user=agent,...` shows `allowtcpforwarding local`, `permitopen 127.0.0.1:3773`, `permitlisten none`, and `no` for agent forwarding, Unix socket forwarding, X11 and tunnels. For the admin user (Lima's UID 1000 user in Lima, root in CI), `allowtcpforwarding` is still `yes`, so the `Match` block applies to `agent` only. |
+
+T07, T09 and T10 read the agent mode, `claude` or `codex`, from the root-owned `/etc/wardian/agent-mode` that provisioning writes. A missing or unknown mode fails them.
 
 T02 (no DNS), T03, T04, T05 (Squid) and T08 (no update host) were retired by #26.
 
@@ -208,24 +263,25 @@ uv run ruff check
 uv run ruff format --check
 ```
 
-The unit tests run without a VM. `tests/test_lima_git.py` needs a fresh, running sandbox made by `create`, because its first test pushes an unrelated history to `main`. It pushes into the sandbox's repo, checks each case `destroy` refuses, fetches, and then destroys the sandbox:
+The unit tests run without a VM. `tests/test_lima_agent_ssh.py` checks SSH as `agent` through the `wardian-<name>` host, read from `~/.wardian/ssh_config` with `ssh -F`: `id -un` is `agent`, `-R` and agent forwarding are refused, `-L` and `-W` to `127.0.0.1:3773` reach a test listener, and `-L` to `127.0.0.1:3774`, `192.168.5.2:53` and `1.1.1.1:443` get `administratively prohibited`. It changes nothing in the sandbox. `tests/test_lima_git.py` needs a fresh, running sandbox made by `create`, because its first test pushes an unrelated history to `main`. It pushes into the sandbox's repo, checks each case `destroy` refuses, fetches, and then destroys the sandbox:
 
 ```sh
-WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_git.py
+WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_agent_ssh.py tests/test_lima_git.py
 ```
 
-Without `WARDIAN_LIMA_SANDBOX`, those tests are skipped.
+Both files carry the `lima` pytest marker, so `uv run pytest -m lima` selects them. Without `WARDIAN_LIMA_SANDBOX`, they are skipped.
 
 ## CI
 
 CircleCI runs `.circleci/config.yml` on Arm machine VMs. The `incus` job starts an Ubuntu 26.04 Incus system container, so the firewall rules never touch the CI host, and then:
 
-1. applies the playbook twice over SSH, with `wardian_resolver` set to the Incus bridge, and fails unless the second run reports `changed=0`
+1. applies the playbook twice over SSH in Codex mode, with `wardian_resolver` set to the Incus bridge and an agent key made for the run, and fails unless the second run reports `changed=0`
 2. restarts the container and checks that nftables loaded
-3. installs a fake Claude token through `wardian-install-claude-token`, then runs the control tests with `--env ci`, through the same `python3 -I` command as `wardian test`
-4. appends a line that isn't nft syntax to `/etc/nftables.conf`, restarts the container, and fails unless it stops within 120 seconds
+3. runs the control tests with `--env ci`, through the same `python3 -I` command as `wardian test`
+4. applies the playbook again in Claude mode, installs a fake Claude token through `wardian-install-claude-token`, and runs the control tests again
+5. appends a line that isn't nft syntax to `/etc/nftables.conf`, restarts the container, and fails unless it stops within 120 seconds
 
-The `mutation` job runs alongside it in its own container. It applies the playbook once, removes one control at a time from the live ruleset, and checks each change:
+The `mutation` job runs alongside it in its own container. It applies the playbook once, in Codex mode, removes one control at a time from the live ruleset, and checks each change:
 
 1. It deletes the private-range drop rule and runs `control_tests.py --env ci --only T06`, which must fail because `agent` and root reached `172.31.255.2` and the fixture's name. Then it reloads `nftables.service` to put the rule back.
 2. It deletes the IPv6 drop rule and runs T06 again, which must fail because `agent` and root reached `fd77:6172:6469::2`. Then it reloads again.
