@@ -1,6 +1,6 @@
 # The wardian CLI
 
-`wardian` creates, tests and destroys a sandbox: a Lima VM built from `lima/wardian.yaml` and provisioned by `ansible/playbook.yml`. So far the playbook:
+`wardian` creates, tests, pushes to, fetches from and destroys a sandbox: a Lima VM built from `lima/wardian.yaml` and provisioned by `ansible/playbook.yml`. So far the playbook:
 
 - creates the unprivileged `agent` user, with the sandbox's own SSH key as its only authorized key
 - creates `/home/agent/project`, the git repo the agents work in
@@ -15,7 +15,7 @@
 - sets `WARDIAN_SANDBOX=1` in `/etc/environment` and `/etc/profile.d/wardian-sandbox.sh`
 - installs the control tests
 
-> **Being re-scoped.** Issue #1 changed on 2026-11-20 (see [ADR 0001](adr/0001-open-egress-instead-of-an-allowlist.md)). #26 replaced Squid and the allowlist with open egress and `wardian-apt`. #27 gave `agent` its own SSH key, a T3 host block and one login per sandbox. `wardian push` and `wardian fetch` replace the manual git setup (#28). This page describes the code on `main`. Sections marked "Replaced by" describe behaviour that is going away.
+> **Being re-scoped.** Issue #1 changed on 2026-11-20 (see [ADR 0001](adr/0001-open-egress-instead-of-an-allowlist.md)). #26 replaced Squid and the allowlist with open egress and `wardian-apt`. #27 gave `agent` its own SSH key, a T3 host block and one login per sandbox. #28 replaced the manual git setup with `wardian push` and `wardian fetch`. This page describes the code on `main`.
 
 ## Requirements
 
@@ -32,6 +32,8 @@ Each command takes an optional sandbox name, which defaults to `wardian`. A name
 ```sh
 uv run wardian create --agent claude   # build, check, boot and provision
 uv run wardian test      # run the control tests and report each threat ID
+uv run wardian push      # send the current repo's HEAD to the sandbox's main
+uv run wardian fetch     # bring back the agent's branches and list files to read
 uv run wardian destroy --repo ~/Developer/myproject   # check for unfetched work, then delete
 ```
 
@@ -73,58 +75,45 @@ The CLI strips control characters from everything limactl, ansible-playbook, ssh
 
 ## Git
 
-> Replaced by #28. `wardian push` and `wardian fetch` will do this setup and the fetch for you, connect only to the sandbox whatever your git config says, and print each branch's tip commit and the changed files Mac tools run on their own.
-
-The sandbox holds one repo, `/home/agent/project`, owned by `agent`. Code moves in and out only by git over SSH. Git connects as Lima's admin user, and `sudo` runs `git-receive-pack` and `git-upload-pack` as `agent`. The admin user never runs git in the repo: `agent` can write its config and hooks, and a hook would run as whoever runs git, and the admin user has sudo.
-
-Set up once on the Mac. Add this to `~/.ssh/config`, above any `Host *` block, since ssh keeps the first value it reads for each option:
-
-```
-Host wardian
-    HostName 127.0.0.1
-    Port 60022
-    User lima
-    IdentityFile ~/.lima/_config/user
-    IdentitiesOnly yes
-    StrictHostKeyChecking yes
-    HostKeyAlias wardian
-    UserKnownHostsFile ~/.ssh/known_hosts.d/wardian
-    GlobalKnownHostsFile /dev/null
-    ForwardAgent no
-    ControlMaster no
-    ControlPath none
-```
-
-These are the settings `wardian` itself uses. For a sandbox with another name, change `wardian` in `Host`, `HostKeyAlias` and the known-hosts file name. If you set `$LIMA_HOME`, the key is in `$LIMA_HOME/_config/user`.
-
-Then, in the Mac repo:
+The sandbox holds one repo, `/home/agent/project`, owned by `agent`. Code moves in and out only by git over SSH, with `wardian push` and `wardian fetch`. Run both from the Mac repo, or pass `--repo`. Push from a repo that holds only this project: git's transfer protocol isn't designed to hide other objects in the repo from the other side (see "Security" in `git help fetch`).
 
 ```sh
-git remote add --no-tags sandbox wardian:/home/agent/project
-git config remote.sandbox.fetch '+refs/heads/agent/*:refs/remotes/sandbox/agent/*'
-git config remote.sandbox.receivepack 'cd / && sudo -n -H -u agent git-receive-pack'
-git config remote.sandbox.uploadpack 'cd / && sudo -n -H -u agent git-upload-pack'
+uv run wardian push --repo ~/Developer/myproject    # send HEAD to the sandbox's main
+uv run wardian fetch --repo ~/Developer/myproject   # bring back agent/* branches
 ```
 
-`cd /` is there because `sudo` keeps the admin's home as the working directory, and `agent` can't enter it.
+Both connect only to the sandbox, whatever your git config says:
 
-Push the base commit with `git push sandbox main`. The repo's `HEAD` is `main`, and `receive.denyCurrentBranch` is `updateInstead`, so the push updates the checked-out files. If `agent` has uncommitted changes there, git refuses the push with `Working directory has unstaged changes`, and nothing changes. A push to a branch that isn't checked out moves only the branch.
+- The URL is exactly `ssh://<admin>@127.0.0.1:60022/home/agent/project`, with no configured remote.
+- `GIT_SSH_COMMAND` is the CLI's own ssh command: `-F /dev/null`, Lima's admin identity file, and the strict host-key options from [Commands](#commands). Your `~/.ssh/config` and the `wardian-<name>` host don't apply.
+- Git connects as Lima's admin user, and runs `cd / && sudo -n -H -u agent git-receive-pack` or `git-upload-pack`, so only `agent` runs git in the repo. The admin user never does: `agent` can write the repo's config and hooks, and a hook runs as whoever runs git.
+- Both refuse if any git config scope, read with `git config --get-regexp` in the Mac repo, has a `url.<base>.insteadOf` or `pushInsteadOf` value that is a prefix of the sandbox URL, or any `remote.<sandbox URL>.*` key. Each would send the URL somewhere else. Rewrites of other URLs, such as GitHub's, don't matter.
+- Every git command the CLI runs on the Mac has `-c core.hooksPath=/dev/null`, so no hook in the Mac repo runs, not even for `update-ref`.
+- They refuse a Mac git older than 2.42.
 
-The agents commit on `agent/<task>` branches. Fetch them into `sandbox/agent/*`:
+`push` runs `git push --no-recurse-submodules --no-follow-tags <URL> <HEAD's commit>:refs/heads/main`, with no force. The guest repo's `HEAD` is `main` and `receive.denyCurrentBranch` is `updateInstead`, so the push updates the checked-out files. If `agent` has uncommitted changes there, git refuses with `Working directory has unstaged changes` and nothing changes. A push that isn't a fast-forward is refused too. After a push, `push` records the commit as `refs/wardian/<name>/base` in the Mac repo. If the guest has another branch checked out, it says that only `main` moved.
+
+`fetch` runs:
 
 ```sh
-( set -o pipefail
-  git -c fetch.fsckObjects=true fetch --no-tags --no-recurse-submodules \
-    sandbox '+refs/heads/agent/*:refs/remotes/sandbox/agent/*' 2>&1 \
-    | LC_ALL=C tr -cd '\011\012\040-\176' )
+git -c fetch.bundleURI= -c fetch.fsckObjects=true fetch --no-tags --no-recurse-submodules \
+  <URL> '+refs/heads/agent/*:refs/wardian/<name>/agent/*'
 ```
 
-- The refspec names `agent/*` only, so no other branch comes back.
+- The refspec names `agent/*` only, so no other branch comes back, and your worktree and branches don't change.
+- `fetch.bundleURI=` stops git downloading a bundle from a URI in your config. `fetch.fsckObjects` checks every object received and rejects a malformed one. On the command line, both beat your config files.
 - `--no-tags` fetches no tags, and `--no-recurse-submodules` fetches no submodules.
-- `fetch.fsckObjects` checks every object received and rejects a malformed one. It's set on the command line because it beats `transfer.fsckObjects` and any `fetch.fsckObjects` in your own config.
-- `tr` keeps only tab, newline and printable ASCII, because the spike showed escape sequences in git's `remote:` lines reach the terminal. `pipefail` keeps git's exit status.
+- The CLI strips control characters from git's output, because the spike showed escape sequences in git's `remote:` lines reach the terminal.
 
-Read the diff, for example `git diff main sandbox/agent/<task>`, and merge the commit you read by its SHA, not by the branch name. Run the agent's code in the sandbox, not on the Mac.
+Then, for each `agent/*` branch, `fetch` prints the branch and its tip SHA, and the changed files Mac tools may run on their own. It compares the tip with its merge-base with `refs/wardian/<name>/base`, or with the empty tree when there's no common commit, using `git diff --name-only -z --no-ext-diff --no-textconv`. A file is listed if any part of its path starts with `.` (`.envrc`, `.vscode/tasks.json`, `.github/workflows/...`), or its name is `package.json`, `pyproject.toml`, `setup.py`, `Makefile`, `justfile`, `Taskfile.yml`, `build.rs` or `Cargo.toml`. The list is a warning, not a block. Control characters are stripped from each path.
+
+```text
+agent/fix 3f1c2a9e0b7d4c5e6f8a9b0c1d2e3f4a5b6c7d8e
+  Changed files Mac tools may run on their own. Read them first:
+    .envrc
+```
+
+Read the diff, for example `git diff refs/wardian/<name>/base <SHA>`, and merge the SHA `fetch` printed, not the branch name, which the next fetch can move: `git merge <SHA>`. Run the agent's code in the sandbox, not on the Mac.
 
 ## SSH as agent
 
@@ -263,7 +252,7 @@ uv run ruff check
 uv run ruff format --check
 ```
 
-The unit tests run without a VM. `tests/test_lima_agent_ssh.py` checks SSH as `agent` through the `wardian-<name>` host, read from `~/.wardian/ssh_config` with `ssh -F`: `id -un` is `agent`, `-R` and agent forwarding are refused, `-L` and `-W` to `127.0.0.1:3773` reach a test listener, and `-L` to `127.0.0.1:3774`, `192.168.5.2:53` and `1.1.1.1:443` get `administratively prohibited`. It changes nothing in the sandbox. `tests/test_lima_git.py` needs a fresh, running sandbox made by `create`, because its first test pushes an unrelated history to `main`. It pushes into the sandbox's repo, checks each case `destroy` refuses, fetches, and then destroys the sandbox:
+The unit tests run without a VM. `tests/test_cli_git.py` runs `push` and `fetch` through git's real transport against a local repo, with a fake `ssh` that runs the remote command locally. It checks that a matching `insteadOf`, a matching `pushInsteadOf` and a `remote.<URL>.*` key, in the repo's or the global config, each make both commands refuse, that an unrelated GitHub `insteadOf` doesn't, that `fetch` succeeds while a `fetch.bundleURI` listener gets no request, and that no hook in the Mac repo runs. Each control has a mutation test that removes it and shows the push goes elsewhere, the listener gets a request, or a hook runs. `tests/test_lima_agent_ssh.py` checks SSH as `agent` through the `wardian-<name>` host, read from `~/.wardian/ssh_config` with `ssh -F`: `id -un` is `agent`, `-R` and agent forwarding are refused, `-L` and `-W` to `127.0.0.1:3773` reach a test listener, and `-L` to `127.0.0.1:3774`, `192.168.5.2:53` and `1.1.1.1:443` get `administratively prohibited`. It changes nothing in the sandbox. `tests/test_lima_git.py` needs a fresh, running sandbox made by `create`, because its first test pushes an unrelated history to `main`. It pushes into the sandbox's repo, checks each case `destroy` refuses, fetches, and then destroys the sandbox:
 
 ```sh
 WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_agent_ssh.py tests/test_lima_git.py
@@ -273,7 +262,9 @@ Both files carry the `lima` pytest marker, so `uv run pytest -m lima` selects th
 
 ## CI
 
-CircleCI runs `.circleci/config.yml` on Arm machine VMs. The `incus` job starts an Ubuntu 26.04 Incus system container, so the firewall rules never touch the CI host, and then:
+CircleCI runs `.circleci/config.yml` on Arm machine VMs. The `python` job runs `ruff check`, `ruff format --check` and `pytest`, including `tests/test_cli_git.py`. It first checks that the image's git is the version in `GIT_VERSION`, so the git the tests run against changes only when someone bumps the image tag and that value together.
+
+The `incus` job starts an Ubuntu 26.04 Incus system container, so the firewall rules never touch the CI host, and then:
 
 1. applies the playbook twice over SSH in Codex mode, with `wardian_resolver` set to the Incus bridge and an agent key made for the run, and fails unless the second run reports `changed=0`
 2. restarts the container and checks that nftables loaded

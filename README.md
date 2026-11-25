@@ -59,14 +59,14 @@ Wardian is in development. The design changed on 2026-11-20 to give agents more 
 | --- | --- |
 | `create`, `test` and `destroy` | |
 | Open internet with private-range drops, and `sudo wardian-apt` | |
-| Git in and out, with a manual setup | `wardian push` and `wardian fetch` ([#28](https://github.com/MMaahir/wardian/issues/28)) |
+| `wardian push` and `wardian fetch`, with the list of changed files Mac tools run on their own | |
 | One agent per sandbox (`--agent claude\|codex`), an `agent` SSH key and a T3 host block | |
 
 ## Requirements
 
 - A Mac with Apple silicon and Lima 2.3 (`brew install lima`)
 - [uv](https://docs.astral.sh/uv/), which installs Python 3.13 and Ansible into `.venv`
-- git 2.42 or later, for `wardian fetch`
+- git 2.42 or later, for `wardian push` and `wardian fetch`
 - For a Claude sandbox, a Claude token in your login Keychain under the service name `wardian-claude-token`. `create --agent claude` refuses without it. Make one with `claude setup-token`, then store it with:
 
   ```sh
@@ -86,6 +86,8 @@ Run the CLI from a clone of this repo:
 ```sh
 uv run wardian create --agent claude   # build, check, boot and provision the sandbox
 uv run wardian test              # run every control test and report each threat ID
+uv run wardian push --repo ~/Developer/myproject    # send HEAD to the sandbox
+uv run wardian fetch --repo ~/Developer/myproject   # bring back the agent's branches
 uv run wardian destroy --repo ~/Developer/myproject   # refuse if work isn't fetched, then delete
 ```
 
@@ -94,9 +96,9 @@ Each command takes an optional sandbox name (default `wardian`), so you can keep
 A typical session:
 
 1. `wardian create --agent claude` (or `--agent codex`) a sandbox for the project. The first time, add the `Include ~/.wardian/ssh_config` line it prints to the top of `~/.ssh/config`. Read the two notices it prints.
-2. Push your project's `main` into it. Until #28, this is the manual git setup in [docs/cli.md](docs/cli.md#git). Push from a repo that holds only this project: git's protocol can reveal information about other objects in the repo you push from.
+2. `uv run wardian push --repo /path/to/project` sends the project's current commit to the sandbox's `main`. Push from a repo that holds only this project: git's protocol can reveal information about other objects in the repo you push from.
 3. In T3 Code, add a remote environment with the host `wardian-<name>`, which connects as `agent`, and give the agent a task. For Codex, log in first with `ssh -t wardian-<name> codex login --device-auth`. Agents work on `agent/<task>` branches.
-4. Fetch the agent's branches back to your Mac, read the diff (and, from #28, the list of files Mac tools run on their own), and merge the commit you read by its SHA.
+4. `uv run wardian fetch --repo /path/to/project` brings the agent's branches back as `refs/wardian/<name>/agent/*`, without touching your worktree. It prints each branch's tip SHA and the changed files Mac tools run on their own, such as `.envrc` and `package.json`. Read the diff and merge that SHA.
 5. When the work is merged, `uv run wardian destroy --repo /path/to/project`. `--repo` must be the project, not this clone, or the unfetched-work check reads the wrong repo and refuses.
 
 Run the agent's code and tests in the sandbox, not on your Mac, until you've reviewed it.
