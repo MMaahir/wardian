@@ -606,11 +606,14 @@ def destroy(name: str, repo: Path) -> None:
         path.unlink()
         print(f"Removed {path}")
     key = agent_key(name)
-    if key.parent.exists():
-        for child in (key, key.with_suffix(".pub")):
-            child.unlink(missing_ok=True)
+    for child in (key, key.with_suffix(".pub")):
+        if child.exists():
+            child.unlink()
+            print(f"Removed {child}")
+    try:
         key.parent.rmdir()
-        print(f"Removed {key.parent}")
+    except OSError:
+        pass  # missing, or holds files wardian didn't write
     remove_host_block(name)
     print(f"Sandbox {name} is gone.")
 

@@ -50,6 +50,8 @@ for _threat_id, (_env, _) in THREAT_IDS.items():
         raise ValueError(f"{_threat_id}: unknown environment {_env!r}")
 
 TESTS = {}
+# Set by main: ci or lima.
+ENV = None
 
 PATH = "PATH=/usr/bin:/bin"
 AS_AGENT = [
@@ -84,6 +86,7 @@ TOKEN = "/etc/wardian/claude-token"  # noqa: S105 - a path, not a token
 # claude or codex: which agent's login the sandbox holds.
 MODE_FILE = "/etc/wardian/agent-mode"
 SSHD_AGENT_CONFIG = "/etc/ssh/sshd_config.d/50-wardian-agent.conf"
+LIMA_ADMIN_UID = 1000
 # sshd -T prints these for agent. Lowercase, as sshd prints them.
 SSHD_AGENT_SETTINGS = {
     "allowtcpforwarding": "local",
@@ -573,18 +576,20 @@ def sshd_limits_agent():
     for key, expected in SSHD_AGENT_SETTINGS.items():
         if agent.get(key) != expected:
             failures.append(f"for agent, {key} is {agent.get(key)!r}, not {expected!r}")
-    # The block is for agent only: root, standing in for the admin user, still
-    # gets sshd's defaults, so the Match line is what limits agent.
-    root = sshd_settings("root")
-    if root.get("allowtcpforwarding") != "yes":
+    # The block is for agent only: the admin user still gets sshd's defaults,
+    # so the Match line is what limits agent. Lima's admin user is UID 1000;
+    # in CI, Ansible connects as root.
+    admin = pwd.getpwuid(LIMA_ADMIN_UID).pw_name if ENV == "lima" else "root"
+    forwarding = sshd_settings(admin).get("allowtcpforwarding")
+    if forwarding != "yes":
         failures.append(
-            f"for root, allowtcpforwarding is {root.get('allowtcpforwarding')!r}, "
-            "not 'yes', so the test can't tell the Match block applies"
+            f"for {admin}, allowtcpforwarding is {forwarding!r}, not 'yes', so "
+            "the test can't tell the Match block applies"
         )
     if failures:
         return False, "; ".join(failures)
     settings = ", ".join(f"{k} {v}" for k, v in SSHD_AGENT_SETTINGS.items())
-    return True, f"for agent: {settings}; root keeps allowtcpforwarding yes"
+    return True, f"for agent: {settings}; {admin} keeps allowtcpforwarding yes"
 
 
 def main(argv=None):
@@ -597,6 +602,8 @@ def main(argv=None):
         help="run only this threat ID; repeat for more",
     )
     args = parser.parse_args(argv)
+    global ENV  # the tests take no arguments
+    ENV = args.env
 
     if os.geteuid() != 0:
         print("control_tests.py: run this as root", file=sys.stderr)

@@ -177,8 +177,10 @@ So an `agent` login gets a shell and one local forward, to T3's port in the gues
 
 ```sh
 limactl delete --force wardian
-rm -f ~/.ssh/known_hosts.d/wardian
+uv run wardian destroy wardian
 ```
+
+With the instance gone, `destroy` only removes the known-hosts file, the agent key and the host block.
 
 **Any work in the sandbox that you haven't fetched is lost.** After the boot-time poweroff, the VM can't boot until the ruleset loads, so the work can't be fetched. After a `wardian-apt` poweroff, don't start it to fetch: see [Packages](#packages).
 
@@ -197,7 +199,7 @@ rm -f ~/.ssh/known_hosts.d/wardian
 | T12 | both | As `agent`, `sudo -n wardian-apt` exits 2 for options (`-y`, `--reinstall`, `-o...`), paths, `.deb` files, names ending in `+` or `-`, a stray `--` and no names. `wardian-apt z.h`, a valid name that apt-get would otherwise treat as a regular expression matching `zsh`, fails with `Unable to locate package`. `wardian-apt jq` exits 0 and leaves `jq` installed. If `jq` is already installed, the test leaves it alone, because once the archive has a newer `jq`, `wardian-apt` refuses the upgrade. The test never removes a package. |
 | T13 | ci | With a fake `jq` 0~wardian installed through `dpkg`, `wardian-apt jq` would upgrade it, so it exits 3 and says to recreate the sandbox. The test then purges `jq`, which is why it runs only in CI. |
 
-| T14 | both | `sshd -t` passes. `sshd -T -C user=agent,...` shows `allowtcpforwarding local`, `permitopen 127.0.0.1:3773`, `permitlisten none`, and `no` for agent forwarding, Unix socket forwarding, X11 and tunnels. For root, standing in for the admin user, `allowtcpforwarding` is still `yes`, so the `Match` block applies to `agent` only. |
+| T14 | both | `sshd -t` passes. `sshd -T -C user=agent,...` shows `allowtcpforwarding local`, `permitopen 127.0.0.1:3773`, `permitlisten none`, and `no` for agent forwarding, Unix socket forwarding, X11 and tunnels. For the admin user (Lima's UID 1000 user in Lima, root in CI), `allowtcpforwarding` is still `yes`, so the `Match` block applies to `agent` only. |
 
 T07, T09 and T10 read the agent mode, `claude` or `codex`, from the root-owned `/etc/wardian/agent-mode` that provisioning writes. A missing or unknown mode fails them.
 
