@@ -325,7 +325,7 @@ def test_refuses_an_old_git(world, monkeypatch, capsys, command):
     real = cli.capture
 
     def old_git(cmd, stdin_data=None):
-        if cmd == ["git", "version"]:
+        if cmd == ["git", *cli.NO_HOOKS, "version"]:
             return "git version 2.41.0\n"
         return real(cmd, stdin_data)
 
@@ -377,9 +377,10 @@ def test_push_never_runs_upload_pack_as_the_admin(world):
     assert wardian("push", world) == 0
 
     commands = (world.tmp / "ssh.log").read_text().splitlines()
-    pack = [c for c in commands if "-pack" in c]
+    programs = [shlex.split(c)[:2] for c in commands]
+    pack = [p for p in programs if p[-1].endswith("-pack")]
     assert pack
-    assert all(c.startswith("exec git-receive-pack ") for c in pack), pack
+    assert all(p == ["exec", "git-receive-pack"] for p in pack), pack
 
 
 def test_fetch_forgets_a_branch_the_agent_deleted(world, capsys):

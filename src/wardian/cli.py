@@ -522,7 +522,7 @@ def mac_git(repo: Path, *args: str) -> list[str]:
 
 
 def check_git_version() -> None:
-    output = capture(["git", "version"])
+    output = capture(["git", *NO_HOOKS, "version"])
     found = re.match(r"git version (\d+)\.(\d+)", output)
     if not found or (int(found[1]), int(found[2])) < GIT_MIN:
         wanted = ".".join(map(str, GIT_MIN))
