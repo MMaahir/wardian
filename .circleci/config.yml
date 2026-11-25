@@ -14,8 +14,8 @@ executors:
       UV_SHA256: 0797542018e541a9288855df555c8077eed06f7a47d206362030480e8ecc9f3d
 
 commands:
-  start-container:
-    description: Start an Ubuntu 26.04 Incus container that Ansible reaches over SSH as root.
+  install-uv:
+    description: Install the pinned uv, checked against its SHA-256.
     steps:
       - run:
           name: Install uv
@@ -27,6 +27,11 @@ commands:
             echo "$UV_SHA256  $CI_TEMP/$tarball" | sha256sum --check
             tar -xzf "$CI_TEMP/$tarball" -C "$HOME/.local/bin" --strip-components=1
             echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASH_ENV"
+
+  start-container:
+    description: Start an Ubuntu 26.04 Incus container that Ansible reaches over SSH as root.
+    steps:
+      - install-uv
 
       - run:
           name: Install Incus
@@ -107,6 +112,30 @@ commands:
               | tee "$CI_TEMP/provision.log"
 
 jobs:
+  # ruff and the Python suite, including the CLI's git controls. The git
+  # tests need git 2.42 or later, and the dated image fixes its version.
+  python:
+    executor: arm-vm
+    environment:
+      GIT_VERSION: 2.53.0
+    steps:
+      - checkout
+      - run:
+          name: Check the image's git version
+          command: |
+            git --version
+            [ "$(git --version)" = "git version $GIT_VERSION" ] \
+              || { echo "expected git $GIT_VERSION; update GIT_VERSION with the image tag"; exit 1; }
+      - install-uv
+      - run:
+          name: ruff
+          command: |
+            uv run --locked ruff check
+            uv run --locked ruff format --check
+      - run:
+          name: pytest
+          command: uv run --locked pytest
+
   incus:
     executor: arm-vm
     steps:
@@ -286,5 +315,6 @@ jobs:
 workflows:
   ci:
     jobs:
+      - python
       - incus
       - mutation

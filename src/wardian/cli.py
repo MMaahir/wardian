@@ -1,9 +1,9 @@
-"""The wardian command: create, test and destroy a sandbox.
+"""The wardian command: create, test, push to, fetch from and destroy a sandbox.
 
 A sandbox is a Lima VM built from lima/wardian.yaml and provisioned with
 ansible/playbook.yml. The CLI uses only the standard library. It runs limactl,
-ansible-playbook and ssh with argument lists, never through a shell, and strips
-control characters from everything they print.
+ansible-playbook, ssh and git with argument lists, never through a shell, and
+strips control characters from everything they print.
 """
 
 import argparse
@@ -49,6 +49,30 @@ AS_AGENT = "cd / && sudo -n -H -u agent"
 OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 DISCARD_HINT = (
     "To discard it anyway, see 'Discarding a sandbox by hand' in docs/cli.md."
+)
+
+# Every git command the CLI runs on the Mac gets these, so no hook in the
+# repo runs, not even reference-transaction for update-ref.
+NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+# fetch downloads no bundle from a URI in the user's config, and checks every
+# object it receives. On the command line, they beat any config file.
+FETCH_CHECKS = ("-c", "fetch.bundleURI=", "-c", "fetch.fsckObjects=true")
+# fetch reads the agent's branches with -z and ref names, both new in 2.42 or
+# earlier. Older gits are untested.
+GIT_MIN = (2, 42)
+# Files Mac tools may run on their own, besides any path with a component
+# starting with a dot (.envrc, .git-hooks, .vscode/tasks.json and the like).
+AUTO_RUN_NAMES = frozenset(
+    {
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "Makefile",
+        "justfile",
+        "Taskfile.yml",
+        "build.rs",
+        "Cargo.toml",
+    }
 )
 
 NAME = re.compile(r"[a-z][a-z0-9-]{0,30}")
@@ -492,11 +516,207 @@ def test(name: str) -> None:
     print(f"All control tests passed on {name}.")
 
 
+def mac_git(repo: Path, *args: str) -> list[str]:
+    """A git command line for the Mac repo, with hooks off."""
+    return ["git", *NO_HOOKS, "-C", str(repo), *args]
+
+
+def check_git_version() -> None:
+    output = capture(["git", *NO_HOOKS, "version"])
+    found = re.match(r"git version (\d+)\.(\d+)", output)
+    if not found or (int(found[1]), int(found[2])) < GIT_MIN:
+        wanted = ".".join(map(str, GIT_MIN))
+        raise WardianError(f"wardian needs git {wanted} or later: {clean(output)}")
+
+
+def running_instance(name: str) -> dict:
+    instance = find_instance(name)
+    if instance is None or instance.get("status") != "Running":
+        raise WardianError(f"sandbox {name} is not running")
+    return instance
+
+
+def sandbox_url(instance: dict) -> str:
+    address, port, user, _ = connection(instance)
+    return f"ssh://{user}@{address}:{port}{GUEST_REPO}"
+
+
+def git_env(name: str, instance: dict) -> dict[str, str]:
+    """git's environment: ssh as the CLI connects, never the user's ssh config."""
+    *_, identity = connection(instance)
+    ssh = ["ssh", *ssh_options(name), "-o", f"IdentityFile={identity}"]
+    return {
+        **os.environ,
+        "GIT_SSH_COMMAND": shlex.join(ssh),
+        "GIT_SSH_VARIANT": "ssh",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def git_config_entries(repo: Path, pattern: str) -> list[tuple[str, str]]:
+    """Keys matching pattern in every config scope git reads in repo."""
+    cmd = mac_git(repo, "config", "--null", "--get-regexp", pattern)
+    # GIT_CONFIG changes the file `git config` reads but not what push and
+    # fetch read, so the check must read what they do.
+    env = {k: v for k, v in os.environ.items() if k != "GIT_CONFIG"}
+    try:
+        result = subprocess.run(
+            cmd, stdin=subprocess.DEVNULL, capture_output=True, check=False, env=env
+        )
+    except OSError as exc:
+        raise WardianError(f"can't run git: {exc}") from exc
+    if result.returncode == 1:  # no key matches
+        return []
+    if result.returncode != 0:
+        stderr = clean(result.stderr.decode("utf-8", "replace")).strip()
+        raise WardianError(f"can't read git config in {repo}: {stderr}")
+    entries = []
+    for item in result.stdout.decode("utf-8", "replace").split("\0"):
+        if item:
+            key, _, value = item.partition("\n")
+            entries.append((key, value))
+    return entries
+
+
+def check_destination(repo: Path, url: str) -> None:
+    """Refuse git config that would send this URL somewhere else."""
+    problems = [
+        f"{key} {value!r}"
+        for key, value in git_config_entries(
+            repo, r"^url\..*\.(insteadof|pushinsteadof)$"
+        )
+        # An empty value is a prefix of every URL.
+        if url.startswith(value)
+    ]
+    problems += [
+        key
+        for key, _ in git_config_entries(repo, r"^remote\.")
+        if key.startswith(f"remote.{url}.")
+    ]
+    if problems:
+        raise WardianError(
+            f"refusing: git config in {repo} changes where {url} goes: "
+            + clean("; ".join(problems))
+        )
+
+
+def push(name: str, repo: Path) -> None:
+    check_git_version()
+    instance = running_instance(name)
+    url = sandbox_url(instance)
+    check_destination(repo, url)
+    head = capture(mac_git(repo, "rev-parse", "--verify", "HEAD^{commit}")).strip()
+    if not OID.fullmatch(head):
+        raise WardianError(f"unexpected object name for HEAD: {clean(head)!r}")
+    # No force: the guest refuses a push that isn't a fast-forward, and
+    # updateInstead refuses one over uncommitted work. push.negotiate would
+    # start a fetch that runs git-upload-pack as the admin user.
+    run(
+        mac_git(
+            repo, "-c", "push.negotiate=false",
+            "push", "--no-recurse-submodules", "--no-follow-tags",
+            f"--receive-pack={AS_AGENT} git-receive-pack",
+            url, f"{head}:refs/heads/main",
+        ),
+        env=git_env(name, instance),
+    )  # fmt: skip
+    base = f"refs/wardian/{name}/base"
+    capture(mac_git(repo, "update-ref", base, head))
+    print(f"Pushed {head} to main in {name}, and recorded it as {base}.")
+    try:
+        checked_out = capture(
+            [
+                *admin_ssh(name, instance),
+                f"{AS_AGENT} git -C {GUEST_REPO} symbolic-ref -q HEAD",
+            ]
+        ).strip()
+    except WardianError:
+        checked_out = ""  # a detached HEAD
+    if checked_out != "refs/heads/main":
+        print(
+            clean(
+                f"{name}'s repo has {checked_out or 'a detached HEAD'} checked "
+                "out, not main, so only the main branch moved. Its files didn't "
+                "change."
+            )
+        )
+
+
+def auto_run(path: str) -> bool:
+    parts = path.split("/")
+    return any(part.startswith(".") for part in parts) or parts[-1] in AUTO_RUN_NAMES
+
+
+def since_base(repo: Path, base: str, oid: str) -> str:
+    """The commit to compare oid with: its merge-base with base, or the empty tree."""
+    result = subprocess.run(
+        mac_git(repo, "merge-base", base, oid),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+    )
+    found = result.stdout.decode().strip()
+    if result.returncode == 0 and OID.fullmatch(found):
+        return found
+    return capture(mac_git(repo, "hash-object", "-t", "tree", "--stdin"), b"").strip()
+
+
+def fetch(name: str, repo: Path) -> None:
+    check_git_version()
+    instance = running_instance(name)
+    url = sandbox_url(instance)
+    check_destination(repo, url)
+    prefix = f"refs/wardian/{name}/"
+    run(
+        mac_git(
+            repo, *FETCH_CHECKS,
+            # --prune drops branches the agent deleted, so none is reported.
+            "fetch", "--prune", "--no-tags", "--no-recurse-submodules",
+            f"--upload-pack={AS_AGENT} git-upload-pack",
+            url, f"+refs/heads/agent/*:{prefix}agent/*",
+        ),
+        env=git_env(name, instance),
+    )  # fmt: skip
+    refs = capture(
+        mac_git(repo, "for-each-ref", "--format=%(objectname) %(refname)", f"{prefix}agent/")
+    ).split("\n")  # fmt: skip
+    refs = [line for line in refs if line]
+    if not refs:
+        print(f"{name} has no agent/* branches.")
+        return
+    for line in refs:
+        oid, _, ref = line.partition(" ")
+        if not OID.fullmatch(oid):
+            raise WardianError(f"unexpected object name for {clean(ref)}: {oid!r}")
+        print(clean(f"{ref.removeprefix(prefix)} {oid}"))
+        since = since_base(repo, f"{prefix}base", oid)
+        # --no-ext-diff and --no-textconv, so no diff driver from any config runs.
+        paths = capture(
+            mac_git(
+                repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                "--no-relative", "--name-only", "-z", since, oid,
+            )
+        ).split("\0")  # fmt: skip
+        # A tab or newline in a name would split one path across lines.
+        flagged = [
+            clean(path).replace("\t", "").replace("\n", "")
+            for path in paths
+            if path and auto_run(path)
+        ]
+        if flagged:
+            print("  Changed files Mac tools may run on their own. Read them first:")
+            for path in flagged:
+                print(f"    {path}")
+        else:
+            print("  No changed files that Mac tools run on their own.")
+    print("Merge the commit you read by its SHA, for example: git merge <SHA>")
+
+
 def on_mac(repo: Path, oid: str) -> bool:
     """Whether a ref in the Mac repo contains the commit oid."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo), "for-each-ref", "--count=1", "--contains", oid],
+            mac_git(repo, "for-each-ref", "--count=1", "--contains", oid),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             check=False,
@@ -561,7 +781,7 @@ def unfetched_work(name: str, instance: dict, repo: Path) -> list[str]:
 
     try:
         if tips:
-            capture(["git", "-C", str(repo), "rev-parse", "--git-dir"])
+            capture(mac_git(repo, "rev-parse", "--git-dir"))
     except WardianError as exc:
         # Keep the reasons already found, so they aren't hidden by this one.
         problems.append(f"can't read the Mac repo: {exc}")
@@ -626,6 +846,8 @@ def main(argv: list[str] | None = None) -> int:
     for func, help_text in (
         (create, "build a sandbox from the template and provision it"),
         (test, "run the control tests in a sandbox"),
+        (push, "push HEAD to main in a sandbox"),
+        (fetch, "fetch a sandbox's agent/* branches and list files to read"),
         (destroy, "delete a fully fetched sandbox, its known-hosts file and key"),
     ):
         command = commands.add_parser(func.__name__, help=help_text)
@@ -638,13 +860,12 @@ def main(argv: list[str] | None = None) -> int:
                 choices=AGENTS,
                 help="the one agent whose login the sandbox gets",
             )
-        if func is destroy:
+        if func in (push, fetch, destroy):
             command.add_argument(
                 "--repo",
                 type=Path,
                 default=Path.cwd(),
-                help="the Mac repo the sandbox's branches must be in "
-                "(default: the current directory)",
+                help="the Mac repo (default: the current directory)",
             )
     kwargs = vars(parser.parse_args(argv))
     func = kwargs.pop("func")
