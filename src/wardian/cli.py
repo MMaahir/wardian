@@ -607,9 +607,11 @@ def destroy(name: str, repo: Path) -> None:
         print(f"Removed {path}")
     key = agent_key(name)
     for child in (key, key.with_suffix(".pub")):
-        if child.exists():
+        try:
             child.unlink()
-            print(f"Removed {child}")
+        except FileNotFoundError:
+            continue
+        print(f"Removed {child}")
     try:
         key.parent.rmdir()
     except OSError:

@@ -269,7 +269,7 @@ The unit tests run without a VM. `tests/test_lima_agent_ssh.py` checks SSH as `a
 WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_agent_ssh.py tests/test_lima_git.py
 ```
 
-Without `WARDIAN_LIMA_SANDBOX`, those tests are skipped.
+Both files carry the `lima` pytest marker, so `uv run pytest -m lima` selects them. Without `WARDIAN_LIMA_SANDBOX`, they are skipped.
 
 ## CI
 
