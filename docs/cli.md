@@ -7,8 +7,8 @@
 - stops and masks the background apt jobs, and removes snapd, packagekit and unattended-upgrades
 - writes a static `/etc/resolv.conf` and masks systemd-resolved
 - upgrades every installed package, before the firewall starts
-- installs the nftables ruleset, with a drop-in that powers the guest off if the ruleset fails to load
-- limits what an SSH login as `agent` gets to one local forward, to T3's port
+- installs the nftables ruleset, with a drop-in that powers the guest off if the ruleset fails to load, and starts SSH only after it (see [Fails closed](#fails-closed))
+- limits what an SSH login as `agent` gets to one local forward, to T3's port, and masks the vsock and Unix socket SSH listeners
 - installs Claude Code, Codex and ripgrep, with root-owned managed settings and instructions for both CLIs, and holds Claude Code at its version
 - installs `wardian-apt`, its sudoers line, and a snapshot of the firewall it checks
 - records the agent mode in `/etc/wardian/agent-mode`, and creates `/etc/wardian` for the Claude token, the script that installs the token, and the login profile script that exports it
@@ -160,6 +160,15 @@ Match User agent
 
 So an `agent` login gets a shell and one local forward, to T3's port in the guest, and nothing else: no remote forwards, no forwards to other ports or hosts, no agent or Unix socket forwarding, no X11 and no tunnels. sshd opens the forwarded connection as `agent`, so the firewall limits it too. Ubuntu's `sshd_config` includes `sshd_config.d` before its own settings, and sshd keeps the first value it reads, so this block wins for `agent`. Lima's admin user keeps sshd's defaults.
 
+## Fails closed
+
+No SSH session starts before the firewall has loaded, and a firewall that fails to load stops the VM.
+
+- `nftables.service` is enabled, and its drop-in `/etc/systemd/system/nftables.service.d/50-wardian.conf` sets `FailureAction=poweroff`. The unit runs before `network-pre.target`, so at boot a ruleset that fails to load stops the guest before networking or SSH start. The claim covers a failed load only: a masked unit, or a ruleset that loads but is wrong, is caught by the control tests and the mutation job instead. The playbook checks the unit with `systemd-analyze verify nftables.service`.
+- `ssh.socket` and `ssh.service` each have a drop-in, `50-wardian-nftables.conf`, with `Requires=nftables.service` and `After=nftables.service`. Ubuntu's SSH is socket-activated, so `ssh.socket` is what listens on port 22.
+- The ruleset template is checked with `nft -c -f` before it's written. The playbook reloads `nftables.service` and never restarts it, because the packaged `ExecStop` runs `nft flush ruleset`, which would also remove Lima's `ip nat` table.
+- Lima's SSH uses TCP (`ssh.overVsock: false`). systemd's SSH generator still makes `sshd-vsock.socket`, listening on vsock port 22, and `sshd-unix-local.socket`, which the spike found open to every local user. The playbook masks and stops both, so only `ssh.socket`, ordered after the firewall, listens for SSH.
+
 ## Discarding a sandbox by hand
 
 `destroy` can't check a sandbox it can't reach, such as one the firewall-failure poweroff stopped, and it refuses. To delete one anyway:
@@ -188,6 +197,8 @@ With the instance gone, `destroy` only removes the known-hosts file, the agent k
 | T12 | both | As `agent`, `sudo -n wardian-apt` exits 2 for options (`-y`, `--reinstall`, `-o...`), paths, `.deb` files, names ending in `+` or `-`, a stray `--` and no names. `wardian-apt z.h`, a valid name that apt-get would otherwise treat as a regular expression matching `zsh`, fails with `Unable to locate package`. `wardian-apt jq` exits 0 and leaves `jq` installed. If `jq` is already installed, the test leaves it alone, because once the archive has a newer `jq`, `wardian-apt` refuses the upgrade. The test never removes a package. |
 | T13 | ci | With a fake `jq` 0~wardian installed through `dpkg`, `wardian-apt jq` would upgrade it, so it exits 3 and says to recreate the sandbox. The test then purges `jq`, which is why it runs only in CI. |
 
+| T15 | both | `systemctl is-enabled nftables.service` is `enabled`, its `FailureAction` is `poweroff`, and `ssh.socket` and `ssh.service` both list `nftables.service` under `Requires` and `After`. |
+| T16 | both | `sshd-vsock.socket` and `sshd-unix-local.socket` are masked, and `systemctl list-sockets --all` shows no socket for SSH but `ssh.socket`. |
 | T14 | both | `sshd -t` passes. `sshd -T -C user=agent,...` shows `allowtcpforwarding local`, `permitopen 127.0.0.1:3773`, `permitlisten none`, and `no` for agent forwarding, Unix socket forwarding, X11 and tunnels. For the admin user (Lima's UID 1000 user in Lima, root in CI), `allowtcpforwarding` is still `yes`, so the `Match` block applies to `agent` only. |
 
 T07, T09 and T10 read the agent mode, `claude` or `codex`, from the root-owned `/etc/wardian/agent-mode` that provisioning writes. A missing or unknown mode fails them.
@@ -252,13 +263,29 @@ uv run ruff check
 uv run ruff format --check
 ```
 
-The unit tests run without a VM. `tests/test_cli_git.py` runs `push` and `fetch` through git's real transport against a local repo, with a fake `ssh` that runs the remote command locally. It checks that a matching `insteadOf`, a matching `pushInsteadOf` and a `remote.<URL>.*` key, in the repo's or the global config, each make both commands refuse, that an unrelated GitHub `insteadOf` doesn't, that `fetch` succeeds while a `fetch.bundleURI` listener gets no request, and that no hook in the Mac repo runs. Each control has a mutation test that removes it and shows the push goes elsewhere, the listener gets a request, or a hook runs. `tests/test_lima_agent_ssh.py` checks SSH as `agent` through the `wardian-<name>` host, read from `~/.wardian/ssh_config` with `ssh -F`: `id -un` is `agent`, `-R` and agent forwarding are refused, `-L` and `-W` to `127.0.0.1:3773` reach a test listener, and `-L` to `127.0.0.1:3774`, `192.168.5.2:53` and `1.1.1.1:443` get `administratively prohibited`. It changes nothing in the sandbox. `tests/test_lima_git.py` needs a fresh, running sandbox made by `create`, because its first test pushes an unrelated history to `main`. It pushes into the sandbox's repo, checks each case `destroy` refuses, fetches, and then destroys the sandbox:
+The unit tests run without a VM. `tests/test_cli_git.py` runs `push` and `fetch` through git's real transport against a local repo, with a fake `ssh` that runs the remote command locally. It checks that a matching `insteadOf`, a matching `pushInsteadOf` and a `remote.<URL>.*` key, in the repo's or the global config, each make both commands refuse, that an unrelated GitHub `insteadOf` doesn't, that `fetch` succeeds while a `fetch.bundleURI` listener gets no request, and that no hook in the Mac repo runs. Each control has a mutation test that removes it and shows the push goes elsewhere, the listener gets a request, or a hook runs. `tests/test_lima_agent_ssh.py` checks SSH as `agent` through the `wardian-<name>` host, read from `~/.wardian/ssh_config` with `ssh -F`: `id -un` is `agent`, `-R` and agent forwarding are refused, `-L` and `-W` to `127.0.0.1:3773` reach a test listener, and `-L` to `127.0.0.1:3774`, `192.168.5.2:53` and `1.1.1.1:443` get `administratively prohibited`. It changes nothing in the sandbox.
+
+`tests/test_lima_isolation.py` checks the Mac's view of the sandbox. Each probe that must fail has a check that its target answers when nothing blocks it:
+
+- `findmnt` in the guest shows no `virtiofs`, `9p` or `sshfs` mount.
+- A listener `agent` starts on every guest address answers inside the guest, but not on the Mac's `127.0.0.1`.
+- A short-lived listener on the Mac's `127.0.0.1` answers on the Mac, but `agent` can't reach it through `192.168.5.2`. Neither can it reach a listener on the Mac's LAN IPv4 address, or `169.254.169.254`. If the macOS application firewall is on, it may prompt for the LAN listener, so that probe is skipped, not passed.
+- `hostLoopback: false` holds on its own. A temporary rule at the top of the output chain, `meta skuid 0 ip daddr 192.168.5.2 tcp dport <port> counter accept`, lets root past nftables to the Mac listener's port. Root's probe must still fail, with the rule's counter above zero. The test deletes the rule in `finally`.
+- With a mount in a temporary `$LIMA_HOME/_config/override.yaml`, `create` refuses and makes no VM.
+
+`tests/test_lima_hostloopback.py` is the positive control for the `hostLoopback` probe. It builds a throwaway VM from `lima/wardian.yaml` with only `hostLoopback: true`, never provisions it, and runs the same probe through `limactl shell`, which must connect. Then it deletes the VM. It runs only when no Lima instance is running, because the template fixes the SSH port. It passed on 2026-11-25 with Lima 2.3.0. **Rerun it whenever the Lima version changes:**
 
 ```sh
-WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_agent_ssh.py tests/test_lima_git.py
+WARDIAN_HOSTLOOPBACK_CONTROL=1 uv run pytest tests/test_lima_hostloopback.py
 ```
 
-Both files carry the `lima` pytest marker, so `uv run pytest -m lima` selects them. Without `WARDIAN_LIMA_SANDBOX`, they are skipped.
+`tests/test_lima_git.py` needs a fresh, running sandbox made by `create`, because its first test pushes an unrelated history to `main`. It pushes into the sandbox's repo, checks each case `destroy` refuses, fetches, and then destroys the sandbox:
+
+```sh
+WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_isolation.py tests/test_lima_agent_ssh.py tests/test_lima_git.py
+```
+
+The Lima test files carry the `lima` pytest marker, so `uv run pytest -m lima` selects them. Without `WARDIAN_LIMA_SANDBOX`, or `WARDIAN_HOSTLOOPBACK_CONTROL=1` for the control, they are skipped.
 
 ## CI
 

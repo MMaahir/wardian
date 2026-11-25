@@ -44,6 +44,8 @@ THREAT_IDS = {
     "T12": ("both", "wardian-apt installs new packages and refuses the rest"),
     "T13": ("ci", "wardian-apt refuses to upgrade an installed package"),
     "T14": ("both", "SSH gives agent only a local forward to T3's port"),
+    "T15": ("both", "SSH starts only after the firewall, which powers off on failure"),
+    "T16": ("both", "only ssh.socket listens for SSH: no vsock or local socket"),
 }
 for _threat_id, (_env, _) in THREAT_IDS.items():
     if _env not in ("ci", "lima", "both"):
@@ -130,6 +132,9 @@ PROTECTED_PATHS = (
     MODE_FILE,
     "/etc/ssh/sshd_config.d",
     SSHD_AGENT_CONFIG,
+    "/etc/systemd/system/nftables.service.d/50-wardian.conf",
+    "/etc/systemd/system/ssh.socket.d/50-wardian-nftables.conf",
+    "/etc/systemd/system/ssh.service.d/50-wardian-nftables.conf",
 )
 # AWS, Google (including Gemini), Cloud SDK, Anthropic and OpenAI API variables.
 # CLAUDE_CODE_OAUTH_TOKEN is allowed: it is the sandbox's own Claude token.
@@ -590,6 +595,61 @@ def sshd_limits_agent():
         return False, "; ".join(failures)
     settings = ", ".join(f"{k} {v}" for k, v in SSHD_AGENT_SETTINGS.items())
     return True, f"for agent: {settings}; {admin} keeps allowtcpforwarding yes"
+
+
+def systemctl(*args):
+    return run(["/usr/bin/systemctl", *args], timeout=30)
+
+
+def unit_property(unit, name):
+    return systemctl("show", unit, "--property", name, "--value").stdout.split()
+
+
+@control("T15")
+def ssh_waits_for_the_firewall():
+    failures = []
+    enabled = systemctl("is-enabled", "nftables.service").stdout.strip()
+    if enabled != "enabled":
+        failures.append(f"nftables.service is {enabled!r}, not enabled")
+    action = unit_property("nftables.service", "FailureAction")
+    if action != ["poweroff"]:
+        failures.append(f"nftables.service FailureAction is {action}, not poweroff")
+    for unit in ("ssh.socket", "ssh.service"):
+        for name in ("Requires", "After"):
+            if "nftables.service" not in unit_property(unit, name):
+                failures.append(f"{unit} has no {name}=nftables.service")
+    if failures:
+        return False, "; ".join(failures)
+    return True, (
+        "nftables.service is enabled with FailureAction=poweroff; ssh.socket and "
+        "ssh.service require it and start after it"
+    )
+
+
+@control("T16")
+def only_ssh_socket_listens():
+    failures = []
+    for unit in ("sshd-vsock.socket", "sshd-unix-local.socket"):
+        state = systemctl("is-enabled", unit).stdout.strip()
+        if state != "masked":
+            failures.append(f"{unit} is {state!r}, not masked")
+    result = systemctl("list-sockets", "--all", "--no-legend", "--full")
+    if result.returncode != 0:
+        failures.append(f"systemctl list-sockets exited {result.returncode}")
+    # Each line is: listen address, socket unit, the units it activates.
+    listeners = [
+        " ".join(line.split())
+        for line in result.stdout.splitlines()
+        if "ssh" in line and "ssh.socket" not in line.split()
+    ]
+    if listeners:
+        failures.append("other SSH listeners: " + "; ".join(listeners))
+    if failures:
+        return False, "; ".join(failures)
+    return (
+        True,
+        "sshd-vsock.socket and sshd-unix-local.socket are masked; only ssh.socket listens",
+    )
 
 
 def main(argv=None):
