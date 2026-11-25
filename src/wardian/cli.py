@@ -556,9 +556,12 @@ def git_env(name: str, instance: dict) -> dict[str, str]:
 def git_config_entries(repo: Path, pattern: str) -> list[tuple[str, str]]:
     """Keys matching pattern in every config scope git reads in repo."""
     cmd = mac_git(repo, "config", "--null", "--get-regexp", pattern)
+    # GIT_CONFIG changes the file `git config` reads but not what push and
+    # fetch read, so the check must read what they do.
+    env = {k: v for k, v in os.environ.items() if k != "GIT_CONFIG"}
     try:
         result = subprocess.run(
-            cmd, stdin=subprocess.DEVNULL, capture_output=True, check=False
+            cmd, stdin=subprocess.DEVNULL, capture_output=True, check=False, env=env
         )
     except OSError as exc:
         raise WardianError(f"can't run git: {exc}") from exc
@@ -606,10 +609,12 @@ def push(name: str, repo: Path) -> None:
     if not OID.fullmatch(head):
         raise WardianError(f"unexpected object name for HEAD: {clean(head)!r}")
     # No force: the guest refuses a push that isn't a fast-forward, and
-    # updateInstead refuses one over uncommitted work.
+    # updateInstead refuses one over uncommitted work. push.negotiate would
+    # start a fetch that runs git-upload-pack as the admin user.
     run(
         mac_git(
-            repo, "push", "--no-recurse-submodules", "--no-follow-tags",
+            repo, "-c", "push.negotiate=false",
+            "push", "--no-recurse-submodules", "--no-follow-tags",
             f"--receive-pack={AS_AGENT} git-receive-pack",
             url, f"{head}:refs/heads/main",
         ),
@@ -664,7 +669,9 @@ def fetch(name: str, repo: Path) -> None:
     prefix = f"refs/wardian/{name}/"
     run(
         mac_git(
-            repo, *FETCH_CHECKS, "fetch", "--no-tags", "--no-recurse-submodules",
+            repo, *FETCH_CHECKS,
+            # --prune drops branches the agent deleted, so none is reported.
+            "fetch", "--prune", "--no-tags", "--no-recurse-submodules",
             f"--upload-pack={AS_AGENT} git-upload-pack",
             url, f"+refs/heads/agent/*:{prefix}agent/*",
         ),
@@ -672,7 +679,8 @@ def fetch(name: str, repo: Path) -> None:
     )  # fmt: skip
     refs = capture(
         mac_git(repo, "for-each-ref", "--format=%(objectname) %(refname)", f"{prefix}agent/")
-    ).splitlines()  # fmt: skip
+    ).split("\n")  # fmt: skip
+    refs = [line for line in refs if line]
     if not refs:
         print(f"{name} has no agent/* branches.")
         return
@@ -686,10 +694,15 @@ def fetch(name: str, repo: Path) -> None:
         paths = capture(
             mac_git(
                 repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
-                "--name-only", "-z", since, oid,
+                "--no-relative", "--name-only", "-z", since, oid,
             )
         ).split("\0")  # fmt: skip
-        flagged = [clean(path) for path in paths if path and auto_run(path)]
+        # A tab or newline in a name would split one path across lines.
+        flagged = [
+            clean(path).replace("\t", "").replace("\n", "")
+            for path in paths
+            if path and auto_run(path)
+        ]
         if flagged:
             print("  Changed files Mac tools may run on their own. Read them first:")
             for path in flagged:

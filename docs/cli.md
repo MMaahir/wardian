@@ -87,25 +87,25 @@ Both connect only to the sandbox, whatever your git config says:
 - The URL is exactly `ssh://<admin>@127.0.0.1:60022/home/agent/project`, with no configured remote.
 - `GIT_SSH_COMMAND` is the CLI's own ssh command: `-F /dev/null`, Lima's admin identity file, and the strict host-key options from [Commands](#commands). Your `~/.ssh/config` and the `wardian-<name>` host don't apply.
 - Git connects as Lima's admin user, and runs `cd / && sudo -n -H -u agent git-receive-pack` or `git-upload-pack`, so only `agent` runs git in the repo. The admin user never does: `agent` can write the repo's config and hooks, and a hook runs as whoever runs git.
-- Both refuse if any git config scope, read with `git config --get-regexp` in the Mac repo, has a `url.<base>.insteadOf` or `pushInsteadOf` value that is a prefix of the sandbox URL, or any `remote.<sandbox URL>.*` key. Each would send the URL somewhere else. Rewrites of other URLs, such as GitHub's, don't matter.
+- Both refuse if any git config scope, read with `git config --get-regexp` in the Mac repo with `GIT_CONFIG` unset, has a `url.<base>.insteadOf` or `pushInsteadOf` value that is a prefix of the sandbox URL, or any `remote.<sandbox URL>.*` key. Each would send the URL somewhere else. Rewrites of other URLs, such as GitHub's, don't matter.
 - Every git command the CLI runs on the Mac has `-c core.hooksPath=/dev/null`, so no hook in the Mac repo runs, not even for `update-ref`.
 - They refuse a Mac git older than 2.42.
 
-`push` runs `git push --no-recurse-submodules --no-follow-tags <URL> <HEAD's commit>:refs/heads/main`, with no force. The guest repo's `HEAD` is `main` and `receive.denyCurrentBranch` is `updateInstead`, so the push updates the checked-out files. If `agent` has uncommitted changes there, git refuses with `Working directory has unstaged changes` and nothing changes. A push that isn't a fast-forward is refused too. After a push, `push` records the commit as `refs/wardian/<name>/base` in the Mac repo. If the guest has another branch checked out, it says that only `main` moved.
+`push` runs `git -c push.negotiate=false push --no-recurse-submodules --no-follow-tags <URL> <HEAD's commit>:refs/heads/main`, with no force. `push.negotiate=false` matters because negotiation starts a fetch with git's default `git-upload-pack`, which would run git in the repo as the admin user. The guest repo's `HEAD` is `main` and `receive.denyCurrentBranch` is `updateInstead`, so the push updates the checked-out files. If `agent` has uncommitted changes there, git refuses with `Working directory has unstaged changes` and nothing changes. A push that isn't a fast-forward is refused too. After a push, `push` records the commit as `refs/wardian/<name>/base` in the Mac repo. If the guest has another branch checked out, it says that only `main` moved.
 
 `fetch` runs:
 
 ```sh
-git -c fetch.bundleURI= -c fetch.fsckObjects=true fetch --no-tags --no-recurse-submodules \
+git -c fetch.bundleURI= -c fetch.fsckObjects=true fetch --prune --no-tags --no-recurse-submodules \
   <URL> '+refs/heads/agent/*:refs/wardian/<name>/agent/*'
 ```
 
-- The refspec names `agent/*` only, so no other branch comes back, and your worktree and branches don't change.
+- The refspec names `agent/*` only, so no other branch comes back, and your worktree and branches don't change. `--prune` deletes the `refs/wardian/<name>/agent/*` ref of a branch the agent deleted, so `fetch` never reports an old tip as current.
 - `fetch.bundleURI=` stops git downloading a bundle from a URI in your config. `fetch.fsckObjects` checks every object received and rejects a malformed one. On the command line, both beat your config files.
 - `--no-tags` fetches no tags, and `--no-recurse-submodules` fetches no submodules.
 - The CLI strips control characters from git's output, because the spike showed escape sequences in git's `remote:` lines reach the terminal.
 
-Then, for each `agent/*` branch, `fetch` prints the branch and its tip SHA, and the changed files Mac tools may run on their own. It compares the tip with its merge-base with `refs/wardian/<name>/base`, or with the empty tree when there's no common commit, using `git diff --name-only -z --no-ext-diff --no-textconv`. A file is listed if any part of its path starts with `.` (`.envrc`, `.vscode/tasks.json`, `.github/workflows/...`), or its name is `package.json`, `pyproject.toml`, `setup.py`, `Makefile`, `justfile`, `Taskfile.yml`, `build.rs` or `Cargo.toml`. The list is a warning, not a block. Control characters are stripped from each path.
+Then, for each `agent/*` branch, `fetch` prints the branch and its tip SHA, and the changed files Mac tools may run on their own. It compares the tip with its merge-base with `refs/wardian/<name>/base`, or with the empty tree when there's no common commit, using `git diff --name-only -z --no-ext-diff --no-textconv --no-relative`, so no diff driver runs and a `diff.relative` setting can't hide files. A file is listed if any part of its path starts with `.` (`.envrc`, `.vscode/tasks.json`, `.github/workflows/...`), or its name is `package.json`, `pyproject.toml`, `setup.py`, `Makefile`, `justfile`, `Taskfile.yml`, `build.rs` or `Cargo.toml`. The list is a warning, not a block. Control characters, tabs and newlines are stripped from each path.
 
 ```text
 agent/fix 3f1c2a9e0b7d4c5e6f8a9b0c1d2e3f4a5b6c7d8e

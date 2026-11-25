@@ -17,8 +17,9 @@ from wardian import cli
 
 NAME = "toy"
 FAKE_SSH = """#!/bin/sh
-# Run the last argument, the remote command, as a local shell command.
+# Log the last argument, the remote command, then run it as a local command.
 for last; do :; done
+printf '%s\\n' "$last" >> "$(dirname "$0")/ssh.log"
 exec /bin/sh -c "$last"
 """
 
@@ -286,7 +287,7 @@ def test_mutation_without_the_override_fetch_asks_the_bundle_uri(
     assert requests
 
 
-HOOKS = ("pre-push", "reference-transaction", "post-merge", "fsmonitor-watchman")
+HOOKS = ("pre-push", "reference-transaction")
 
 
 def install_hooks(world):
@@ -316,7 +317,7 @@ def test_mutation_without_hooks_path_hooks_run(world, monkeypatch):
 
     assert wardian("push", world) == 0
 
-    assert marker.exists()
+    assert set(marker.read_text().split()) == set(HOOKS)
 
 
 @pytest.mark.parametrize("command", ["push", "fetch"])
@@ -364,3 +365,48 @@ def test_git_ssh_command_ignores_the_users_ssh_config(monkeypatch, tmp_path):
 )
 def test_auto_run_rule(path, flagged):
     assert cli.auto_run(path) is flagged
+
+
+def test_push_never_runs_upload_pack_as_the_admin(world):
+    # push.negotiate makes push fetch first, with git's default upload-pack
+    # command, which would run git in the guest repo as the admin user.
+    git(world.mac, "config", "push.negotiate", "true")
+    assert wardian("push", world) == 0
+    (world.mac / "words.txt").write_text("new\n")
+    git(world.mac, "commit", "-q", "-am", "new")
+    assert wardian("push", world) == 0
+
+    commands = (world.tmp / "ssh.log").read_text().splitlines()
+    pack = [c for c in commands if "-pack" in c]
+    assert pack
+    assert all(c.startswith("exec git-receive-pack ") for c in pack), pack
+
+
+def test_fetch_forgets_a_branch_the_agent_deleted(world, capsys):
+    assert wardian("push", world) == 0
+    agent_commits(world, {"a.txt": "a\n"}, branch="agent/gone")
+    assert wardian("fetch", world) == 0
+    git(world.guest, "branch", "-q", "-D", "agent/gone")
+    agent_commits(world, {"b.txt": "b\n"}, branch="agent/kept")
+    capsys.readouterr()
+
+    assert wardian("fetch", world) == 0
+
+    report = [
+        line.split()[0]
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("agent/")
+    ]
+    assert report == ["agent/kept"]
+
+
+def test_fetch_from_a_subdirectory_lists_root_files(world, capsys):
+    git(world.mac, "config", "diff.relative", "true")
+    (world.mac / "sub").mkdir()
+    assert wardian("push", world) == 0
+    agent_commits(world, {".envrc": "x\n"})
+    capsys.readouterr()
+
+    assert cli.main(["fetch", NAME, "--repo", str(world.mac / "sub")]) == 0
+
+    assert "    .envrc\n" in capsys.readouterr().out
