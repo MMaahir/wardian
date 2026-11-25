@@ -34,3 +34,5 @@ extend-select = ["B", "I", "S", "UP"]
 "tests/*" = ["S101"]
 # The Lima tests run git on the Mac, as the docs tell the user to.
 "tests/test_lima_git.py" = ["S603", "S607"]
+# They run ssh and ssh-agent on the Mac, as T3 would.
+"tests/test_lima_agent_ssh.py" = ["S603", "S607"]

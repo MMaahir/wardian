@@ -1,8 +1,12 @@
 # Provisions a fresh Wardian sandbox. Apply it only to a new VM: a sandbox
 # that has been used is destroyed and recreated, never re-provisioned.
 #
-# wardian_resolver is the DNS server the sandbox uses: Lima's host agent in a
-# VM, the Incus bridge in CI. The wardian CLI and the CI workflow pass it.
+# The wardian CLI and the CI workflow pass three extra vars:
+# - wardian_resolver: the DNS server the sandbox uses, Lima's host agent in a
+#   VM or the Incus bridge in CI
+# - wardian_agent_mode: claude or codex, the one agent whose login the
+#   sandbox gets
+# - wardian_agent_key: the public half of the sandbox's SSH key for agent
 - name: Provision a Wardian sandbox
   hosts: all
   become: true
@@ -14,6 +18,15 @@
           - wardian_resolver is defined
           - wardian_resolver is match('^[0-9]{1,3}([.][0-9]{1,3}){3}$')
         fail_msg: "Pass wardian_resolver, the resolver's IPv4 address, as an extra var."
+
+    - name: Check the agent mode and key
+      ansible.builtin.assert:
+        that:
+          - wardian_agent_mode is defined
+          - wardian_agent_mode in ['claude', 'codex']
+          - wardian_agent_key is defined
+          - wardian_agent_key is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,2}( [A-Za-z0-9@._-]+)?$')
+        fail_msg: "Pass wardian_agent_mode (claude or codex) and wardian_agent_key, an ed25519 public key, as extra vars."
   roles:
     - agent_user
     # Early, so a create that fails later still leaves a repo destroy can check.
@@ -24,6 +37,7 @@
     # service, and its ExecStop flushes every table, Lima's included.
     - apt_upgrade
     - nftables
+    - agent_ssh
     - agent_clis
     # After the upgrade and the ruleset, so the firewall snapshot is final.
     - wardian_apt

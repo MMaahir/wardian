@@ -1,0 +1,6 @@
+# Only a running sshd needs it. A socket-activated one that hasn't started
+# reads the new config when it does. Reloading keeps open sessions.
+- name: Reload sshd
+  ansible.builtin.command:
+    argv: [systemctl, try-reload-or-restart, ssh.service]
+  changed_when: true

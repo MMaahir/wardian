@@ -60,14 +60,14 @@ Wardian is in development. The design changed on 2026-11-20 to give agents more 
 | `create`, `test` and `destroy` | |
 | Open internet with private-range drops, and `sudo wardian-apt` | |
 | Git in and out, with a manual setup | `wardian push` and `wardian fetch` ([#28](https://github.com/MMaahir/wardian/issues/28)) |
-| Claude token from the Keychain | An `agent` SSH key and a T3 host block, and one agent per sandbox ([#27](https://github.com/MMaahir/wardian/issues/27)). T3 can't connect to an automated sandbox until this lands |
+| One agent per sandbox (`--agent claude\|codex`), an `agent` SSH key and a T3 host block | |
 
 ## Requirements
 
 - A Mac with Apple silicon and Lima 2.3 (`brew install lima`)
 - [uv](https://docs.astral.sh/uv/), which installs Python 3.13 and Ansible into `.venv`
 - git 2.42 or later, for `wardian fetch`
-- A Claude token in your login Keychain under the service name `wardian-claude-token`. `create` refuses without it, even if you plan to use Codex, until #27 adds a choice of agent. Make one with `claude setup-token`, then store it with:
+- For a Claude sandbox, a Claude token in your login Keychain under the service name `wardian-claude-token`. `create --agent claude` refuses without it. Make one with `claude setup-token`, then store it with:
 
   ```sh
   security add-generic-password -U -a "$USER" -s wardian-claude-token -w
@@ -84,7 +84,7 @@ A sandbox uses 4 CPUs, 4 GiB of memory and 20 GiB of disk. One runs at a time.
 Run the CLI from a clone of this repo:
 
 ```sh
-uv run wardian create            # build, check, boot and provision the sandbox
+uv run wardian create --agent claude   # build, check, boot and provision the sandbox
 uv run wardian test              # run every control test and report each threat ID
 uv run wardian destroy --repo ~/Developer/myproject   # refuse if work isn't fetched, then delete
 ```
@@ -93,9 +93,9 @@ Each command takes an optional sandbox name (default `wardian`), so you can keep
 
 A typical session:
 
-1. `wardian create` a sandbox for the project.
+1. `wardian create --agent claude` (or `--agent codex`) a sandbox for the project. The first time, add the `Include ~/.wardian/ssh_config` line it prints to the top of `~/.ssh/config`. Read the two notices it prints.
 2. Push your project's `main` into it. Until #28, this is the manual git setup in [docs/cli.md](docs/cli.md#git). Push from a repo that holds only this project: git's protocol can reveal information about other objects in the repo you push from.
-3. Connect T3 Code to the sandbox as `agent` (needs #27) and give the agent a task. Agents work on `agent/<task>` branches.
+3. In T3 Code, add a remote environment with the host `wardian-<name>`, which connects as `agent`, and give the agent a task. For Codex, log in first with `ssh -t wardian-<name> codex login --device-auth`. Agents work on `agent/<task>` branches.
 4. Fetch the agent's branches back to your Mac, read the diff (and, from #28, the list of files Mac tools run on their own), and merge the commit you read by its SHA.
 5. When the work is merged, `uv run wardian destroy --repo /path/to/project`. `--repo` must be the project, not this clone, or the unfetched-work check reads the wrong repo and refuses.
 

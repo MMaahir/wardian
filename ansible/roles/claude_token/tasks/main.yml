@@ -1,6 +1,8 @@
-# Where the Claude token goes, and how it reaches agent's environment. The
-# playbook never sees the token: `wardian create` pipes it from the Mac's
-# Keychain into the install script after the playbook runs.
+# The agent mode, and where the Claude token goes and how it reaches agent's
+# environment. The playbook never sees the token: in Claude mode,
+# `wardian create` pipes it from the Mac's Keychain into the install script
+# after the playbook runs. A Codex sandbox has no token, and Codex logs in
+# with device auth inside it.
 
 # Only root and the agent group can list it, and only root can write it.
 - name: Create the token directory
@@ -26,3 +28,18 @@
     owner: root
     group: root
     mode: "0644"
+
+# The control tests read it to know which login the sandbox should hold.
+- name: Record the agent mode
+  ansible.builtin.copy:
+    content: "{{ wardian_agent_mode }}\n"
+    dest: /etc/wardian/agent-mode
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Leave no Claude token in a Codex sandbox
+  ansible.builtin.file:
+    path: /etc/wardian/claude-token
+    state: absent
+  when: wardian_agent_mode == 'codex'

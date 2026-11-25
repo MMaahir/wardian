@@ -26,6 +26,9 @@ HOST_KEY = "/etc/ssh/ssh_host_ed25519_key.pub"
 # The guest's DNS server: Lima's host agent answers on the default gateway.
 # See "Resolver" in spike/phase-1-notes.md.
 LIMA_RESOLVER = "192.168.5.2"
+AGENTS = ("claude", "codex")
+# T3 forwards to this port in the guest. sshd lets agent forward to it only.
+T3_PORT = 3773
 # The claude_token role installs this script. It reads the token on stdin.
 INSTALL_SCRIPT = "/usr/local/sbin/wardian-install-claude-token"
 # The login Keychain item that holds the token from `claude setup-token`.
@@ -199,6 +202,104 @@ def write_known_hosts(name: str, host_key: str) -> Path:
     return path
 
 
+def wardian_home() -> Path:
+    return Path.home() / ".wardian"
+
+
+def agent_key(name: str) -> Path:
+    """The private half of the sandbox's key for agent."""
+    return wardian_home() / name / "agent_ed25519"
+
+
+def host_config() -> Path:
+    return wardian_home() / "ssh_config"
+
+
+def make_agent_key(name: str) -> str:
+    """Generate a new key for agent and return its public half."""
+    key = agent_key(name)
+    wardian_home().mkdir(mode=0o700, exist_ok=True)
+    key.parent.mkdir(mode=0o700, exist_ok=True)
+    # create runs this only after limactl created a new instance, so any old
+    # key belonged to a sandbox that no longer exists.
+    for path in (key, key.with_suffix(".pub")):
+        path.unlink(missing_ok=True)
+    capture(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"agent@{name}",
+         "-f", str(key)]
+    )  # fmt: skip
+    key.chmod(0o600)
+    return key.with_suffix(".pub").read_text().strip()
+
+
+def host_block_markers(name: str) -> tuple[str, str]:
+    return f"# BEGIN wardian-{name}", f"# END wardian-{name}"
+
+
+def without_host_block(text: str, name: str) -> str:
+    begin, end = host_block_markers(name)
+    lines, skipping = [], False
+    for line in text.splitlines(keepends=True):
+        if line.rstrip("\n") == begin:
+            skipping = True
+        elif skipping and line.rstrip("\n") == end:
+            skipping = False
+        elif not skipping:
+            lines.append(line)
+    return "".join(lines)
+
+
+def quoted(path: Path) -> str:
+    """A path as one ssh_config argument."""
+    if '"' in str(path):
+        raise WardianError(f"can't write a path with a double quote: {path}")
+    return f'"{path}"'
+
+
+def write_host_block(name: str, address: str, port: int) -> Path:
+    """Write the wardian-<name> host block T3 connects through, as agent."""
+    options = ssh_options(name)
+    # The admin's options, minus the ones that only suit the CLI: T3 reads
+    # this file through the user's ~/.ssh/config, and may prompt.
+    settings = [
+        tuple(value.split("=", 1))
+        for flag, value in zip(options[::2], options[1::2], strict=True)
+        if flag == "-o" and not value.startswith("BatchMode=")
+    ]
+    lines = [
+        f"Host wardian-{name}",
+        f"    HostName {address}",
+        f"    Port {port}",
+        "    User agent",
+        f"    IdentityFile {quoted(agent_key(name))}",
+    ]
+    for key, value in settings:
+        if key == "UserKnownHostsFile":
+            value = quoted(Path(value))
+        lines.append(f"    {key} {value}")
+    begin, end = host_block_markers(name)
+    path = host_config()
+    old = path.read_text() if path.exists() else ""
+    kept = without_host_block(old, name)
+    if kept and not kept.endswith("\n"):
+        kept += "\n"
+    block = "\n".join([begin, *lines, end]) + "\n"
+    wardian_home().mkdir(mode=0o700, exist_ok=True)
+    path.write_text(kept + block)
+    path.chmod(0o600)
+    return path
+
+
+def remove_host_block(name: str) -> None:
+    path = host_config()
+    if path.exists():
+        text = path.read_text()
+        kept = without_host_block(text, name)
+        if kept != text:
+            path.write_text(kept)
+            print(f"Removed the wardian-{name} host from {path}")
+
+
 def ssh_options(name: str) -> list[str]:
     """Options for SSH as Lima's admin user, with strict host-key checking."""
     return [
@@ -255,10 +356,24 @@ def admin_ssh(name: str, instance: dict) -> list[str]:
     ]  # fmt: skip
 
 
-def create(name: str) -> None:
+NOTICES = (
+    (
+        "Notice: html_render pages from the agent run in the T3 app on your "
+        "Mac. While the thread is open they can make your Mac send requests to "
+        "its own localhost and LAN. Wardian can't stop this; only T3 can."
+    ),
+    (
+        "Notice: the agent's account must have no connectors linked. For "
+        "Codex, the ChatGPT account must also have no Codex Cloud environments "
+        "or tasks. Wardian can't check either."
+    ),
+)
+
+
+def create(name: str, agent: str) -> None:
     check_lima_global_config()
     # Read first, so a missing token stops create before it builds a VM.
-    token = read_claude_token()
+    token = read_claude_token() if agent == "claude" else None
     run(["limactl", "create", "--tty=false", f"--name={name}", str(TEMPLATE)])
 
     instance = find_instance(name)
@@ -273,6 +388,8 @@ def create(name: str) -> None:
             f"refused to start {name}, and deleted it: " + "; ".join(problems)
         )
 
+    agent_public_key = make_agent_key(name)
+    print(f"Wrote {agent_key(name)}")
     run(["limactl", "start", "--tty=false", name])
     host_key = capture(["limactl", "shell", "--workdir", "/", name, "cat", HOST_KEY])
     print(f"Wrote {write_known_hosts(name, host_key)}")
@@ -284,6 +401,8 @@ def create(name: str) -> None:
         "ansible_user": user,
         "ansible_ssh_private_key_file": identity,
         "wardian_resolver": LIMA_RESOLVER,
+        "wardian_agent_mode": agent,
+        "wardian_agent_key": agent_public_key,
         # Extra vars beat ANSIBLE_* settings from the environment, such as
         # ANSIBLE_HOST_KEY_CHECKING=false. ssh_args come first on the ssh
         # command line, and ssh keeps the first value of each option. They
@@ -310,10 +429,23 @@ def create(name: str) -> None:
         # Use this repo's config, never an ansible.cfg in the working directory.
         env={**os.environ, "ANSIBLE_CONFIG": str(ANSIBLE_CONFIG)},
     )
-    # Over ssh's stdin, so the token is never in a file or argument on the Mac.
-    capture([*admin_ssh(name, instance), "sudo", "-n", INSTALL_SCRIPT], token)
-    print(f"Installed the Claude token in {name}.")
-    print(f"Sandbox {name} is ready.")
+    if token is not None:
+        # Over ssh's stdin, so the token is never in a file or argument on the Mac.
+        capture([*admin_ssh(name, instance), "sudo", "-n", INSTALL_SCRIPT], token)
+        print(f"Installed the Claude token in {name}.")
+    print(f"Wrote the wardian-{name} host to {write_host_block(name, address, port)}")
+    print("For T3 and ssh to find it, add this line at the top of ~/.ssh/config:")
+    print("    Include ~/.wardian/ssh_config")
+    if token is None:
+        print(
+            f"Then log Codex in with `ssh -t wardian-{name} codex login "
+            "--device-auth` and approve the code in a browser."
+        )
+    print()
+    for notice in NOTICES:
+        print(notice)
+    print()
+    print(f"Sandbox {name} is ready for {agent}.")
 
 
 def test(name: str) -> None:
@@ -473,6 +605,13 @@ def destroy(name: str, repo: Path) -> None:
     if path.exists():
         path.unlink()
         print(f"Removed {path}")
+    key = agent_key(name)
+    if key.parent.exists():
+        for child in (key, key.with_suffix(".pub")):
+            child.unlink(missing_ok=True)
+        key.parent.rmdir()
+        print(f"Removed {key.parent}")
+    remove_host_block(name)
     print(f"Sandbox {name} is gone.")
 
 
@@ -482,11 +621,18 @@ def main(argv: list[str] | None = None) -> int:
     for func, help_text in (
         (create, "build a sandbox from the template and provision it"),
         (test, "run the control tests in a sandbox"),
-        (destroy, "delete a fully fetched sandbox and its known-hosts file"),
+        (destroy, "delete a fully fetched sandbox, its known-hosts file and key"),
     ):
         command = commands.add_parser(func.__name__, help=help_text)
         command.add_argument("name", nargs="?", default="wardian", type=sandbox_name)
         command.set_defaults(func=func)
+        if func is create:
+            command.add_argument(
+                "--agent",
+                required=True,
+                choices=AGENTS,
+                help="the one agent whose login the sandbox gets",
+            )
         if func is destroy:
             command.add_argument(
                 "--repo",

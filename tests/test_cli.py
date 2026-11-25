@@ -33,7 +33,8 @@ def test_refuses_lima_global_config(
     (tmp_path / "_config" / filename).write_text("mounts: [{location: '~'}]\n")
     monkeypatch.setenv("LIMA_HOME", str(tmp_path))
 
-    assert cli.main([command]) == 1
+    args = ["create", "--agent", "codex"] if command == "create" else [command]
+    assert cli.main(args) == 1
     assert filename in capsys.readouterr().err
 
 
@@ -132,8 +133,83 @@ def test_create_stops_before_building_a_vm_without_a_token(
 
     monkeypatch.setattr(cli, "capture", missing)
 
-    assert cli.main(["create"]) == 1
+    assert cli.main(["create", "--agent", "claude"]) == 1
     assert "security add-generic-password" in capsys.readouterr().err
+
+
+def test_create_requires_an_agent(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["create"])
+    assert "--agent" in capsys.readouterr().err
+
+
+def test_codex_mode_never_reads_the_keychain(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIMA_HOME", str(tmp_path))
+    monkeypatch.setattr(cli, "read_claude_token", lambda: pytest.fail("read it"))
+
+    def stop(cmd, env=None):
+        raise cli.WardianError("stop at limactl create")
+
+    monkeypatch.setattr(cli, "run", stop)
+
+    assert cli.main(["create", "--agent", "codex"]) == 1
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.Path, "home", lambda: tmp_path)
+    return tmp_path
+
+
+def test_host_block_uses_agent_and_the_cli_ssh_options(home):
+    path = cli.write_host_block("toy", "127.0.0.1", 60022)
+
+    assert path == home / ".wardian" / "ssh_config"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.read_text() == (
+        "# BEGIN wardian-toy\n"
+        "Host wardian-toy\n"
+        "    HostName 127.0.0.1\n"
+        "    Port 60022\n"
+        "    User agent\n"
+        f'    IdentityFile "{home}/.wardian/toy/agent_ed25519"\n'
+        "    IdentitiesOnly yes\n"
+        "    ForwardAgent no\n"
+        "    ControlMaster no\n"
+        "    ControlPath none\n"
+        "    StrictHostKeyChecking yes\n"
+        "    HostKeyAlias toy\n"
+        f'    UserKnownHostsFile "{home}/.ssh/known_hosts.d/toy"\n'
+        "    GlobalKnownHostsFile /dev/null\n"
+        "# END wardian-toy\n"
+    )
+
+
+def test_host_blocks_for_other_sandboxes_are_kept(home):
+    cli.write_host_block("one", "127.0.0.1", 60022)
+    cli.write_host_block("two", "127.0.0.1", 60022)
+    cli.write_host_block("one", "127.0.0.1", 60023)
+
+    text = cli.host_config().read_text()
+    assert text.count("Host wardian-one\n") == 1
+    assert "Port 60023" in text
+    assert "Host wardian-two\n" in text
+
+    cli.remove_host_block("one")
+    text = cli.host_config().read_text()
+    assert "wardian-one" not in text
+    assert text.startswith("# BEGIN wardian-two\n")
+
+
+def test_agent_key_is_new_and_private(home):
+    public = cli.make_agent_key("toy")
+    key = cli.agent_key("toy")
+
+    assert public.startswith("ssh-ed25519 ")
+    assert public.endswith(" agent@toy")
+    assert key.stat().st_mode & 0o777 == 0o600
+    assert key.parent.stat().st_mode & 0o777 == 0o700
+    assert cli.make_agent_key("toy") != public
 
 
 def test_destroy_refuses_a_sandbox_that_isnt_running(
