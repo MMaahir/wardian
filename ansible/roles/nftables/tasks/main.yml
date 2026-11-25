@@ -60,7 +60,7 @@
 # Ansible's open SSH connection mid-stream as new and drops sshd's replies,
 # and the play hangs. This table tracks every packet and accepts it, so the
 # connection is already established when the drop policy loads.
-- name: Track connections before the ruleset loads
+- name: Track connections before the ruleset loads  # noqa: no-handler - it must run at this point in the play, not at the end
   ansible.builtin.command:
     argv: [nft, -f, -]
     stdin: |
@@ -83,7 +83,7 @@
 - name: Load the ruleset now
   ansible.builtin.meta: flush_handlers
 
-- name: Remove the handover table
+- name: Remove the handover table  # noqa: no-handler - it must run at this point in the play, not at the end
   ansible.builtin.command:
     argv: [nft, delete, table, inet, wardian_handover]
   when: nftables_ruleset is changed

@@ -11,7 +11,11 @@ dependencies = []
 wardian = "wardian.cli:main"
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = [
+    "ansible-lint>=26.11.0",
+    "pytest",
+    "ruff",
+]
 # ansible-playbook is a program the CLI runs, not a library it imports.
 provision = ["ansible-core"]
 

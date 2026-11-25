@@ -7,7 +7,7 @@
     shell: /bin/bash
     groups: ""
     create_home: true
-  register: agent_user
+  register: agent_user_account
 
 # useradd gives a new user a subordinate ID range. With one, agent could run
 # rootless containers whose processes the firewall sees under other UIDs.
@@ -15,7 +15,7 @@
 - name: Remove agent's subordinate user and group IDs
   ansible.builtin.lineinfile:
     path: "{{ item }}"
-    regexp: "^(agent|{{ agent_user.uid }}):"
+    regexp: "^(agent|{{ agent_user_account.uid }}):"
     state: absent
   loop:
     - /etc/subuid

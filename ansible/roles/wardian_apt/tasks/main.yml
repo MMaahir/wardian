@@ -58,12 +58,12 @@
 - name: Read the loaded ruleset
   ansible.builtin.command:
     argv: [nft, -s, list, table, inet, wardian]
-  register: wardian_ruleset
+  register: wardian_apt_ruleset
   changed_when: false
 
 - name: Record the loaded ruleset
   ansible.builtin.copy:
-    content: "{{ wardian_ruleset.stdout }}\n"
+    content: "{{ wardian_apt_ruleset.stdout }}\n"
     dest: /var/lib/wardian/inet-wardian.nft
     owner: root
     group: root
@@ -73,11 +73,11 @@
   ansible.builtin.stat:
     path: /etc/nftables.conf
     checksum_algorithm: sha256
-  register: nftables_conf
+  register: wardian_apt_conf
 
 - name: Record the ruleset file's hash
   ansible.builtin.copy:
-    content: "{{ nftables_conf.stat.checksum }}\n"
+    content: "{{ wardian_apt_conf.stat.checksum }}\n"
     dest: /var/lib/wardian/nftables.conf.sha256
     owner: root
     group: root

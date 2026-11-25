@@ -23,13 +23,13 @@
     owner: root
     group: root
     mode: "0644"
-  register: claude_code_repo
+  register: agent_clis_repo
 
 # The earlier roles' cache_valid_time would skip this within the hour.
-- name: Read the new repo's package list
+- name: Read the new repo's package list  # noqa: no-handler - it must run at this point in the play, not at the end
   ansible.builtin.apt:
     update_cache: true
-  when: claude_code_repo is changed
+  when: agent_clis_repo is changed
 
 - name: Install Claude Code and ripgrep
   ansible.builtin.apt:
