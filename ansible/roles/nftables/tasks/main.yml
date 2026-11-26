@@ -53,7 +53,7 @@
     group: root
     mode: "0644"
   loop: [ssh.socket, ssh.service]
-  register: ssh_ordering
+  register: nftables_ssh_ordering
 
 # The kernel tracks connections only while a loaded rule uses conntrack, and
 # on a fresh guest none does. When the drop policy loads, the kernel picks up
@@ -78,7 +78,7 @@
     name: nftables.service
     enabled: true
     state: started
-    daemon_reload: "{{ nftables_dropin is changed or ssh_ordering is changed }}"
+    daemon_reload: "{{ nftables_dropin is changed or nftables_ssh_ordering is changed }}"
 
 - name: Load the ruleset now
   ansible.builtin.meta: flush_handlers
