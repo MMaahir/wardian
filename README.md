@@ -10,9 +10,9 @@ Wardian puts each project in its own VM (the sandbox). The agent gets the projec
 
 ## What it protects
 
-This section and the next describe the design in issue #1. [Status](#status) says which parts are on `main` today.
+This section and the next summarise the [threat model](docs/threat-model.md), which lists each threat, the control that stops it and the test that proves it. The adversary is an over-eager or prompt-injected agent running any code it likes in the sandbox as `agent`.
 
-- **Your other projects.** The sandbox has no host mounts, and holds only the one repo you push into it. The firewall blocks it from the private addresses of your Mac and your LAN, so it can't reach services listening on them.
+- **Your other projects.** The sandbox has no host mounts, and holds only the one repo you push into it. The firewall drops new connections from the sandbox to the private addresses of your Mac and your LAN. The exceptions are DNS and DHCP to Lima's gateway.
 - **Your sensitive files.** Nothing from your home folder is shared with the VM. Code comes back only by git, as refs that don't touch your working tree. Wardian lists changed files that Mac tools run on their own, such as dotfiles, `package.json` and `Makefile`, so you see them before you merge.
 - **Your credentials.** No SSH agent forwarding, no host API keys and no cloud or forge tokens enter the sandbox. The only credential inside is the chosen agent's own login.
 
@@ -24,9 +24,13 @@ Wardian is not fool-proof containment. It aims to keep agents away from things t
 - The agent can run anything it downloads, inside the VM.
 - T3's `html_render` pages run in the Mac app and can make your Mac send requests to its own localhost and LAN while the thread is open. Only T3 can fix this.
 - A Mac with a public IPv4 address, or a service your router forwards to it, can be reached, because the firewall blocks private, link-local and metadata IPv4 addresses and all non-loopback IPv6, not public IPv4 addresses.
-- A bug in the guest kernel, Lima or the hypervisor could reach your Mac.
+- `codex cloud` works from the sandbox, so the account rules in [Requirements](#requirements) matter.
+- The agent can read its own login and change the T3 server in the VM.
+- The agent may reach Lima's vsock endpoints, which nftables doesn't filter.
+- A bug in an archive package, the guest kernel, sudo, Lima or the hypervisor could give the agent root or reach your Mac.
+- Git's protocol isn't designed to hide other objects in the repo you push from, so push from a repo that holds only this project.
 
-The full list of accepted risks is in the spec, [issue #1](https://github.com/MMaahir/wardian/issues/1).
+The [threat model](docs/threat-model.md#accepted-risks) has the full list of accepted risks.
 
 ## How it works
 
@@ -44,10 +48,10 @@ your repo ── wardian push / fetch ───▶ /home/agent/project
                                              IPv4, and non-loopback IPv6: dropped
 ```
 
-- The VM comes from Wardian's own Lima template: pinned Ubuntu image, no mounts, no port forwarding, no access to the Mac's loopback.
+- The VM comes from Wardian's own Lima template: pinned Ubuntu image, no mounts, no automatic port forwarding of guest services, no access to the Mac's loopback. An `agent` SSH login may forward only to T3's port, `127.0.0.1:3773`.
 - Agents run as `agent`, an unprivileged user. Their only root access is `sudo wardian-apt <packages>`, which can only install new system packages.
-- nftables drops traffic to private, link-local and metadata addresses for every user, apart from DNS and DHCP to Lima's gateway, so even root inside the VM can't reach those addresses without breaking the firewall first.
-- Every control has a threat ID and a test that checks it from outside. CI runs the tests on every change, and a mutation job removes controls one at a time to check their tests fail.
+- nftables drops new connections to private, link-local and metadata addresses for every user, apart from DNS and DHCP to Lima's gateway. Root inside the VM would have to change the firewall first.
+- CI runs the guest control tests tagged `ci` or `both`, the CLI's tests, and mutation checks that remove selected controls and check their tests fail, on every change. Tests that need a real Lima VM run on the Mac. The [threat model](docs/threat-model.md) says where each test runs.
 
 [ADR 0001](docs/adr/0001-open-egress-instead-of-an-allowlist.md) explains why agents get the open internet rather than an allowlist.
 
@@ -61,6 +65,7 @@ Wardian is in development. The design changed on 2026-11-20 to give agents more 
 | Open internet with private-range drops, and `sudo wardian-apt` | |
 | `wardian push` and `wardian fetch`, with the list of changed files Mac tools run on their own | |
 | One agent per sandbox (`--agent claude\|codex`), an `agent` SSH key and a T3 host block | |
+| After provisioning, SSH only after the firewall and poweroff when it fails to load; Mac-side isolation tests | |
 
 ## Requirements
 
@@ -122,7 +127,8 @@ CI runs on CircleCI: the playbook is applied twice inside an Incus container on 
 
 ## Docs
 
-- [Issue #1](https://github.com/MMaahir/wardian/issues/1): the spec, threat model and accepted risks
+- [docs/threat-model.md](docs/threat-model.md): the protected assets, each threat with its control and test, and the accepted risks
+- [Issue #1](https://github.com/MMaahir/wardian/issues/1): the spec
 - [docs/cli.md](docs/cli.md): the CLI, control tests, firewall and CI
 - [docs/adr/](docs/adr/): design decisions
 - [spike/](spike/): the hand-built sandboxes the automation is based on
