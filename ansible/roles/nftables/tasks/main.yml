@@ -91,5 +91,5 @@
 
 - name: Check the nftables unit and its drop-in
   ansible.builtin.command:
-    argv: [systemd-analyze, verify, nftables.service]
+    argv: [systemd-analyze, verify, --man=no, nftables.service]
   changed_when: false
