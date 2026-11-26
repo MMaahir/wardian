@@ -10,7 +10,7 @@ Wardian puts each project in its own VM (the sandbox). The agent gets the projec
 
 ## What it protects
 
-This section and the next describe the design in issue #1. [Status](#status) says which parts are on `main` today.
+This section and the next summarise the [threat model](docs/threat-model.md), which lists each threat, the control that stops it and the test that proves it. The adversary is an over-eager or prompt-injected agent running any code it likes in the sandbox as `agent`.
 
 - **Your other projects.** The sandbox has no host mounts, and holds only the one repo you push into it. The firewall blocks it from the private addresses of your Mac and your LAN, so it can't reach services listening on them.
 - **Your sensitive files.** Nothing from your home folder is shared with the VM. Code comes back only by git, as refs that don't touch your working tree. Wardian lists changed files that Mac tools run on their own, such as dotfiles, `package.json` and `Makefile`, so you see them before you merge.
@@ -24,9 +24,13 @@ Wardian is not fool-proof containment. It aims to keep agents away from things t
 - The agent can run anything it downloads, inside the VM.
 - T3's `html_render` pages run in the Mac app and can make your Mac send requests to its own localhost and LAN while the thread is open. Only T3 can fix this.
 - A Mac with a public IPv4 address, or a service your router forwards to it, can be reached, because the firewall blocks private, link-local and metadata IPv4 addresses and all non-loopback IPv6, not public IPv4 addresses.
-- A bug in the guest kernel, Lima or the hypervisor could reach your Mac.
+- `codex cloud` works from the sandbox, so the account rules in [Requirements](#requirements) matter.
+- The agent can read its own login and change the T3 server in the VM.
+- The agent may reach Lima's vsock endpoints, which nftables doesn't filter.
+- A bug in an archive package, the guest kernel, sudo, Lima or the hypervisor could give the agent root or reach your Mac.
+- Git's protocol isn't designed to hide other objects in the repo you push from, so push from a repo that holds only this project.
 
-The full list of accepted risks is in the spec, [issue #1](https://github.com/MMaahir/wardian/issues/1).
+The [threat model](docs/threat-model.md#accepted-risks) has the full list of accepted risks.
 
 ## How it works
 
@@ -61,6 +65,7 @@ Wardian is in development. The design changed on 2026-11-20 to give agents more 
 | Open internet with private-range drops, and `sudo wardian-apt` | |
 | `wardian push` and `wardian fetch`, with the list of changed files Mac tools run on their own | |
 | One agent per sandbox (`--agent claude\|codex`), an `agent` SSH key and a T3 host block | |
+| SSH only after the firewall, poweroff when it fails to load, and Mac-side isolation tests | |
 
 ## Requirements
 
@@ -122,7 +127,8 @@ CI runs on CircleCI: the playbook is applied twice inside an Incus container on 
 
 ## Docs
 
-- [Issue #1](https://github.com/MMaahir/wardian/issues/1): the spec, threat model and accepted risks
+- [docs/threat-model.md](docs/threat-model.md): the protected assets, each threat with its control and test, and the accepted risks
+- [Issue #1](https://github.com/MMaahir/wardian/issues/1): the spec
 - [docs/cli.md](docs/cli.md): the CLI, control tests, firewall and CI
 - [docs/adr/](docs/adr/): design decisions
 - [spike/](spike/): the hand-built sandboxes the automation is based on
