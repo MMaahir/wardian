@@ -135,7 +135,7 @@ jobs:
             uv run --locked ruff format --check
       - run:
           name: ansible-lint
-          command: uv run --locked ansible-lint ansible
+          command: uv run --locked ansible-lint --offline ansible
       - run:
           name: pytest
           command: uv run --locked pytest

@@ -294,7 +294,7 @@ CircleCI runs `.circleci/config.yml` on Arm machine VMs, in one workflow, `ci`, 
 
 The config uses no orbs. Every tool it downloads is pinned and checked: uv by version and SHA-256, the machine image by a dated tag (`ubuntu-2604:2026.11.1`), and Python packages by `uv.lock`, with `uv run --locked`. Dependabot (`.github/dependabot.yml`) opens weekly pull requests for `uv.lock`. It doesn't read CircleCI config, so update the image tag, `GIT_VERSION`, and uv's version and SHA-256 by hand.
 
-The `python` job runs `ruff check`, `ruff format --check`, `ansible-lint ansible` and `pytest`, including `tests/test_cli_git.py`. It first checks that the image's git is the version in `GIT_VERSION`, so the git the tests run against changes only when someone bumps the image tag and that value together.
+The `python` job runs `ruff check`, `ruff format --check`, `ansible-lint --offline ansible` (`--offline` keeps it from refreshing its schemas, so only `uv.lock` changes its rules) and `pytest`, including `tests/test_cli_git.py`. It first checks that the image's git is the version in `GIT_VERSION`, so the git the tests run against changes only when someone bumps the image tag and that value together.
 
 The `incus` job starts an Ubuntu 26.04 Incus system container, so the firewall rules never touch the CI host, and then:
 
