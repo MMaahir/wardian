@@ -16,6 +16,7 @@ import shlex
 import socket
 import subprocess
 import threading
+import time
 
 import pytest
 
@@ -30,10 +31,15 @@ pytestmark = [
 ]
 
 BANNER = b"wardian-mac-listener\n"
-# Run in the guest: connect to argv[1]:argv[2] and print what comes back.
+# Run in the guest: connect to argv[1]:argv[2] and print what comes back. A
+# failed connect prints "blocked: ..." and exits 0, so a probe that didn't run
+# (broken SSH, no python3) can't pass as blocked.
 CONNECT = (
     "import socket, sys\n"
-    "s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5)\n"
+    "try:\n"
+    "    s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5)\n"
+    "except OSError as error:\n"
+    "    sys.exit(print(f'blocked: {error!r}'))\n"
     "sys.stdout.write(s.recv(100).decode())\n"
 )
 
@@ -90,6 +96,17 @@ def connect_from_guest(host: str, port: int, root_instance=None):
     if root_instance is not None:
         return as_root(root_instance, command)
     return as_agent(command)
+
+
+def assert_blocked(result: subprocess.CompletedProcess) -> None:
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("blocked: "), result.stdout
+
+
+def private4_drops(instance) -> int:
+    result = as_root(instance, "nft list counter inet wardian private4_dropped")
+    assert result.returncode == 0, result.stderr
+    return int(result.stdout.split("packets ")[1].split()[0])
 
 
 @contextlib.contextmanager
@@ -177,8 +194,13 @@ def test_a_listener_agent_starts_is_unreachable_from_the_mac(instance):
         inside = connect_from_guest("127.0.0.1", port)
         assert inside.stdout == "agent\n", inside.stderr
         # Lima would forward it to the Mac's 127.0.0.1 without the ignore rule.
-        with pytest.raises(OSError):
-            reach_from_mac("127.0.0.1", port)
+        # Lima's host agent sets up forwards when the guest agent reports a
+        # new listener, a few seconds later, so keep trying for a while.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            with pytest.raises(OSError):
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            time.sleep(0.5)
     finally:
         # The listener exits when ssh closes its stdin.
         server.stdin.close()
@@ -189,8 +211,7 @@ def test_guest_cant_reach_the_macs_loopback_through_the_gateway():
     with mac_listener("127.0.0.1") as port:
         assert reach_from_mac("127.0.0.1", port) == BANNER
         result = connect_from_guest(cli.LIMA_RESOLVER, port)
-    assert result.returncode != 0
-    assert "wardian-mac-listener" not in result.stdout
+    assert_blocked(result)
 
 
 def test_guest_cant_reach_the_macs_lan_address():
@@ -202,13 +223,16 @@ def test_guest_cant_reach_the_macs_lan_address():
     with mac_listener("0.0.0.0") as port:  # noqa: S104 - the LAN address must answer
         assert reach_from_mac(address, port) == BANNER
         result = connect_from_guest(address, port)
-    assert result.returncode != 0
-    assert "wardian-mac-listener" not in result.stdout
+    assert_blocked(result)
 
 
-def test_guest_cant_reach_the_metadata_address():
+def test_guest_cant_reach_the_metadata_address(instance):
+    # Nothing need listen there, so the drop counter shows the firewall, not
+    # an empty address, stopped the probe.
+    before = private4_drops(instance)
     result = connect_from_guest("169.254.169.254", 80)
-    assert result.returncode != 0
+    assert_blocked(result)
+    assert private4_drops(instance) > before
 
 
 def test_host_loopback_off_holds_on_its_own(instance):
@@ -232,8 +256,7 @@ def test_host_loopback_off_holds_on_its_own(instance):
                 instance, f"nft delete rule inet wardian output handle {handle}"
             )
     assert removed.returncode == 0, removed.stderr
-    assert result.returncode != 0
-    assert "wardian-mac-listener" not in result.stdout
+    assert_blocked(result)
     counted = next(
         line for line in listed.stdout.splitlines() if f"# handle {handle}" in line
     )
@@ -241,13 +264,12 @@ def test_host_loopback_off_holds_on_its_own(instance):
     assert packets > 0, counted
 
 
-def test_create_refuses_a_lima_override(tmp_path, capsys):
+def test_create_refuses_a_lima_override(tmp_path, monkeypatch, capsys):
+    # A temporary LIMA_HOME, so other Lima commands never see the override.
+    monkeypatch.setenv("LIMA_HOME", str(tmp_path / "lima"))
     override = cli.lima_home() / "_config" / "override.yaml"
-    assert not override.exists()
+    override.parent.mkdir(parents=True)
     override.write_text(f"mounts:\n- location: {tmp_path}\n")
-    try:
-        assert cli.main(["create", "--agent", "codex", "wardian-override"]) == 1
-    finally:
-        override.unlink()
+    assert cli.main(["create", "--agent", "codex", "wardian-override"]) == 1
     assert "override.yaml" in capsys.readouterr().err
     assert cli.find_instance("wardian-override") is None

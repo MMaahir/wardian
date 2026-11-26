@@ -40,6 +40,8 @@ def test_host_loopback_true_reaches_the_macs_loopback(tmp_path):
     ).stdout
     assert " Running" not in running, f"stop every instance first:\n{running}"
     assert cli.find_instance(CONTROL) is None
+    # The control VM must differ from a sandbox only in hostLoopback.
+    cli.check_lima_global_config()
 
     text = cli.TEMPLATE.read_text()
     assert text.count("  hostLoopback: false\n") == 1

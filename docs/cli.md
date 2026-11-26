@@ -264,15 +264,16 @@ uv run ruff format --check
 
 The unit tests run without a VM. `tests/test_cli_git.py` runs `push` and `fetch` through git's real transport against a local repo, with a fake `ssh` that runs the remote command locally. It checks that a matching `insteadOf`, a matching `pushInsteadOf` and a `remote.<URL>.*` key, in the repo's or the global config, each make both commands refuse, that an unrelated GitHub `insteadOf` doesn't, that `fetch` succeeds while a `fetch.bundleURI` listener gets no request, and that no hook in the Mac repo runs. Each control has a mutation test that removes it and shows the push goes elsewhere, the listener gets a request, or a hook runs. `tests/test_lima_agent_ssh.py` checks SSH as `agent` through the `wardian-<name>` host, read from `~/.wardian/ssh_config` with `ssh -F`: `id -un` is `agent`, `-R` and agent forwarding are refused, `-L` and `-W` to `127.0.0.1:3773` reach a test listener, and `-L` to `127.0.0.1:3774`, `192.168.5.2:53` and `1.1.1.1:443` get `administratively prohibited`. It changes nothing in the sandbox.
 
-`tests/test_lima_isolation.py` checks the Mac's view of the sandbox. Each probe that must fail has a check that its target answers when nothing blocks it:
+`tests/test_lima_isolation.py` checks the Mac's view of the sandbox. Each probe that must fail has a check that its target answers when nothing blocks it, or that the firewall counted the drop. A guest probe passes as blocked only when it ran and printed `blocked: <error>`, so broken SSH or a missing `python3` fails the test:
 
 - `findmnt` in the guest shows no `virtiofs`, `9p` or `sshfs` mount.
-- A listener `agent` starts on every guest address answers inside the guest, but not on the Mac's `127.0.0.1`.
-- A short-lived listener on the Mac's `127.0.0.1` answers on the Mac, but `agent` can't reach it through `192.168.5.2`. Neither can it reach a listener on the Mac's LAN IPv4 address, or `169.254.169.254`. If the macOS application firewall is on, it may prompt for the LAN listener, so that probe is skipped, not passed.
+- A listener `agent` starts on every guest address answers inside the guest. For 15 seconds, the time Lima would take to set up a forward, no connection to that port on the Mac's `127.0.0.1` succeeds.
+- A short-lived listener on the Mac's `127.0.0.1` answers on the Mac, but `agent` can't reach it through `192.168.5.2`. Neither can it reach a listener on the Mac's LAN IPv4 address. If the macOS application firewall is on, it may prompt for the LAN listener, so that probe is skipped, not passed.
+- `agent` can't reach `169.254.169.254:80`, and the `private4_dropped` counter goes up, because nothing may listen there.
 - `hostLoopback: false` holds on its own. A temporary rule at the top of the output chain, `meta skuid 0 ip daddr 192.168.5.2 tcp dport <port> counter accept`, lets root past nftables to the Mac listener's port. Root's probe must still fail, with the rule's counter above zero. The test deletes the rule in `finally`.
-- With a mount in a temporary `$LIMA_HOME/_config/override.yaml`, `create` refuses and makes no VM.
+- With a mount in `_config/override.yaml` under a temporary `$LIMA_HOME`, `create` refuses and makes no VM. The temporary `$LIMA_HOME` keeps other Lima commands from reading the override.
 
-`tests/test_lima_hostloopback.py` is the positive control for the `hostLoopback` probe. It builds a throwaway VM from `lima/wardian.yaml` with only `hostLoopback: true`, never provisions it, and runs the same probe through `limactl shell`, which must connect. Then it deletes the VM. It runs only when no Lima instance is running, because the template fixes the SSH port. It passed on 2026-11-25 with Lima 2.3.0. **Rerun it whenever the Lima version changes:**
+`tests/test_lima_hostloopback.py` is the positive control for the `hostLoopback` probe. It builds a throwaway VM from `lima/wardian.yaml` with only `hostLoopback: true`, never provisions it, and runs the same probe through `limactl shell`, which must connect. Then it deletes the VM. It runs only when no Lima instance is running, because the template fixes the SSH port, and refuses, as `create` does, when a Lima `_config` file exists. It passed on 2026-11-25 with Lima 2.3.0. **Rerun it whenever the Lima version changes:**
 
 ```sh
 WARDIAN_HOSTLOOPBACK_CONTROL=1 uv run pytest tests/test_lima_hostloopback.py
