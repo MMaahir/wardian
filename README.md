@@ -51,7 +51,7 @@ your repo ── wardian push / fetch ───▶ /home/agent/project
 - The VM comes from Wardian's own Lima template: pinned Ubuntu image, no mounts, no automatic port forwarding of guest services, no access to the Mac's loopback. An `agent` SSH login may forward only to T3's port, `127.0.0.1:3773`.
 - Agents run as `agent`, an unprivileged user. Their only root access is `sudo wardian-apt <packages>`, which can only install new system packages.
 - nftables drops new connections to private, link-local and metadata addresses for every user, apart from DNS and DHCP to Lima's gateway. Root inside the VM would have to change the firewall first.
-- CI runs the guest control tests (threat IDs `T01` to `T16`), the CLI's tests, and mutation checks that remove selected controls and check their tests fail, on every change. Tests that need a real Lima VM run on the Mac. The [threat model](docs/threat-model.md) says where each test runs.
+- CI runs the guest control tests tagged `ci` or `both`, the CLI's tests, and mutation checks that remove selected controls and check their tests fail, on every change. Tests that need a real Lima VM run on the Mac. The [threat model](docs/threat-model.md) says where each test runs.
 
 [ADR 0001](docs/adr/0001-open-egress-instead-of-an-allowlist.md) explains why agents get the open internet rather than an allowlist.
 
