@@ -34,6 +34,27 @@
     mode: "0644"
   register: nftables_dropin
 
+# Ubuntu's SSH is socket-activated: ssh.socket listens and starts
+# ssh.service. Both get the ordering, in case ssh.service starts on its own.
+- name: Create the SSH drop-in directories
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [ssh.socket, ssh.service]
+
+- name: Start SSH only after the firewall
+  ansible.builtin.copy:
+    src: 50-wardian-nftables.conf
+    dest: "/etc/systemd/system/{{ item }}.d/50-wardian-nftables.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [ssh.socket, ssh.service]
+  register: ssh_ordering
+
 # The kernel tracks connections only while a loaded rule uses conntrack, and
 # on a fresh guest none does. When the drop policy loads, the kernel picks up
 # Ansible's open SSH connection mid-stream as new and drops sshd's replies,
@@ -57,7 +78,7 @@
     name: nftables.service
     enabled: true
     state: started
-    daemon_reload: "{{ nftables_dropin is changed }}"
+    daemon_reload: "{{ nftables_dropin is changed or ssh_ordering is changed }}"
 
 - name: Load the ruleset now
   ansible.builtin.meta: flush_handlers
@@ -67,3 +88,8 @@
     argv: [nft, delete, table, inet, wardian_handover]
   when: nftables_ruleset is changed
   changed_when: true
+
+- name: Check the nftables unit and its drop-in
+  ansible.builtin.command:
+    argv: [systemd-analyze, verify, --man=no, nftables.service]
+  changed_when: false
