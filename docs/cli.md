@@ -269,7 +269,7 @@ The unit tests run without a VM. `tests/test_cli_git.py` runs `push` and `fetch`
 - `findmnt` in the guest shows no `virtiofs`, `9p` or `sshfs` mount.
 - A listener `agent` starts on every guest address answers inside the guest. For 15 seconds, the time Lima would take to set up a forward, no connection to that port on the Mac's `127.0.0.1` succeeds.
 - A short-lived listener on the Mac's `127.0.0.1` answers on the Mac, but `agent` can't reach it through `192.168.5.2`. Neither can it reach a listener on the Mac's LAN IPv4 address. If the macOS application firewall is on, it may prompt for the LAN listener, so that probe is skipped, not passed.
-- `agent` can't reach `169.254.169.254:80`, and the `private4_dropped` counter goes up, because nothing may listen there.
+- `agent` can't reach `169.254.169.254:80`. Nothing may listen there, so a temporary counter-only rule at the top of the `drop_logged` chain, matching only `agent`'s packets to that address and port, must count the probe. The test deletes the rule in `finally`.
 - `hostLoopback: false` holds on its own. A temporary rule at the top of the output chain, `meta skuid 0 ip daddr 192.168.5.2 tcp dport <port> counter accept`, lets root past nftables to the Mac listener's port. Root's probe must still fail, with the rule's counter above zero. The test deletes the rule in `finally`.
 - With a mount in `_config/override.yaml` under a temporary `$LIMA_HOME`, `create` refuses and makes no VM. The temporary `$LIMA_HOME` keeps other Lima commands from reading the override.
 

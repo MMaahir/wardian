@@ -103,10 +103,10 @@ def assert_blocked(result: subprocess.CompletedProcess) -> None:
     assert result.stdout.startswith("blocked: "), result.stdout
 
 
-def private4_drops(instance) -> int:
-    result = as_root(instance, "nft list counter inet wardian private4_dropped")
-    assert result.returncode == 0, result.stderr
-    return int(result.stdout.split("packets ")[1].split()[0])
+def counted_packets(listing: str, handle: str) -> int:
+    """The packet count of the rule with this handle in `nft --handle list`."""
+    line = next(line for line in listing.splitlines() if f"# handle {handle}" in line)
+    return int(line.split("counter packets ")[1].split()[0])
 
 
 @contextlib.contextmanager
@@ -227,12 +227,25 @@ def test_guest_cant_reach_the_macs_lan_address():
 
 
 def test_guest_cant_reach_the_metadata_address(instance):
-    # Nothing need listen there, so the drop counter shows the firewall, not
-    # an empty address, stopped the probe.
-    before = private4_drops(instance)
-    result = connect_from_guest("169.254.169.254", 80)
+    # Nothing need listen there, so a counter-only rule at the top of the drop
+    # chain shows the firewall dropped this probe, not that the address was
+    # empty. Other drops don't match it.
+    rule = "meta skuid agent ip daddr 169.254.169.254 tcp dport 80 counter"
+    insert = as_root(
+        instance, f"nft --echo --handle insert rule inet wardian drop_logged {rule}"
+    )
+    assert insert.returncode == 0, insert.stderr
+    handle = insert.stdout.split("# handle ")[-1].split()[0]
+    try:
+        result = connect_from_guest("169.254.169.254", 80)
+        listed = as_root(instance, "nft --handle list chain inet wardian drop_logged")
+    finally:
+        removed = as_root(
+            instance, f"nft delete rule inet wardian drop_logged handle {handle}"
+        )
+    assert removed.returncode == 0, removed.stderr
     assert_blocked(result)
-    assert private4_drops(instance) > before
+    assert counted_packets(listed.stdout, handle) > 0
 
 
 def test_host_loopback_off_holds_on_its_own(instance):
@@ -257,11 +270,7 @@ def test_host_loopback_off_holds_on_its_own(instance):
             )
     assert removed.returncode == 0, removed.stderr
     assert_blocked(result)
-    counted = next(
-        line for line in listed.stdout.splitlines() if f"# handle {handle}" in line
-    )
-    packets = int(counted.split("counter packets ")[1].split()[0])
-    assert packets > 0, counted
+    assert counted_packets(listed.stdout, handle) > 0
 
 
 def test_create_refuses_a_lima_override(tmp_path, monkeypatch, capsys):
