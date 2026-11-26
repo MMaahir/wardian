@@ -1,6 +1,6 @@
 # GitHub repo rulesets
 
-Terraform manages the rulesets on `MMaahir/wardian`. The `main` ruleset blocks force-pushes and deletion of the default branch for everyone, including the repo admin. It requires no approvals or status checks yet.
+Terraform manages the rulesets on `MMaahir/wardian`. The `main` ruleset applies to everyone, including the repo admin. It blocks force-pushes and deletion of the default branch, and requires a pull request, with zero approvals, whose `ci/circleci: python`, `ci/circleci: incus` and `ci/circleci: mutation` checks pass. A pull request with a failing or missing check can't be merged.
 
 ## Requirements
 

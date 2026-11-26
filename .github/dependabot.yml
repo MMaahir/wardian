@@ -1,0 +1,9 @@
+# Dependabot keeps uv.lock current. It doesn't read CircleCI config, so the
+# machine image tag, GIT_VERSION, and uv's version and SHA-256 in
+# .circleci/config.yml are updated by hand.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly

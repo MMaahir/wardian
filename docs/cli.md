@@ -260,6 +260,7 @@ Root owns both CLIs and their config, and the managed config turns their updates
 uv run pytest
 uv run ruff check
 uv run ruff format --check
+uv run ansible-lint ansible
 ```
 
 The unit tests run without a VM. `tests/test_cli_git.py` runs `push` and `fetch` through git's real transport against a local repo, with a fake `ssh` that runs the remote command locally. It checks that a matching `insteadOf`, a matching `pushInsteadOf` and a `remote.<URL>.*` key, in the repo's or the global config, each make both commands refuse, that an unrelated GitHub `insteadOf` doesn't, that `fetch` succeeds while a `fetch.bundleURI` listener gets no request, and that no hook in the Mac repo runs. Each control has a mutation test that removes it and shows the push goes elsewhere, the listener gets a request, or a hook runs. `tests/test_lima_agent_ssh.py` checks SSH as `agent` through the `wardian-<name>` host, read from `~/.wardian/ssh_config` with `ssh -F`: `id -un` is `agent`, `-R` and agent forwarding are refused, `-L` and `-W` to `127.0.0.1:3773` reach a test listener, and `-L` to `127.0.0.1:3774`, `192.168.5.2:53` and `1.1.1.1:443` get `administratively prohibited`. It changes nothing in the sandbox.
@@ -289,7 +290,11 @@ The Lima test files carry the `lima` pytest marker, so `uv run pytest -m lima` s
 
 ## CI
 
-CircleCI runs `.circleci/config.yml` on Arm machine VMs. The `python` job runs `ruff check`, `ruff format --check` and `pytest`, including `tests/test_cli_git.py`. It first checks that the image's git is the version in `GIT_VERSION`, so the git the tests run against changes only when someone bumps the image tag and that value together.
+CircleCI runs `.circleci/config.yml` on Arm machine VMs, in one workflow, `ci`, with three jobs: `python`, `incus` and `mutation`. Each posts a `ci/circleci: <job>` status, and the `main` ruleset requires all three (see `terraform/github/`). A leftover `gha` workflow, a GitHub Actions shim that always passed and posted to the same status, was deleted from the CircleCI project on 2026-11-20, so only these jobs post statuses.
+
+The config uses no orbs. Every tool it downloads is pinned and checked: uv by version and SHA-256, the machine image by a dated tag (`ubuntu-2604:2026.11.1`), and Python packages by `uv.lock`, with `uv run --locked`. Dependabot (`.github/dependabot.yml`) opens weekly pull requests for `uv.lock`. It doesn't read CircleCI config, so update the image tag, `GIT_VERSION`, and uv's version and SHA-256 by hand.
+
+The `python` job runs `ruff check`, `ruff format --check`, `ansible-lint --offline ansible` (`--offline` keeps it from refreshing its schemas, so only `uv.lock` changes its rules) and `pytest`, including `tests/test_cli_git.py`. It first checks that the image's git is the version in `GIT_VERSION`, so the git the tests run against changes only when someone bumps the image tag and that value together.
 
 The `incus` job starts an Ubuntu 26.04 Incus system container, so the firewall rules never touch the CI host, and then:
 

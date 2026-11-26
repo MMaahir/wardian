@@ -112,8 +112,9 @@ commands:
               | tee "$CI_TEMP/provision.log"
 
 jobs:
-  # ruff and the Python suite, including the CLI's git controls. The git
-  # tests need git 2.42 or later, and the dated image fixes its version.
+  # ruff, ansible-lint and the Python suite, including the CLI's git
+  # controls. The git tests need git 2.42 or later, and the dated image fixes
+  # its version.
   python:
     executor: arm-vm
     environment:
@@ -132,6 +133,9 @@ jobs:
           command: |
             uv run --locked ruff check
             uv run --locked ruff format --check
+      - run:
+          name: ansible-lint
+          command: uv run --locked ansible-lint --offline ansible
       - run:
           name: pytest
           command: uv run --locked pytest

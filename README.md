@@ -113,6 +113,7 @@ To see connections the firewall blocked, run `limactl shell <name> sudo journalc
 uv run pytest
 uv run ruff check
 uv run ruff format --check
+uv run ansible-lint ansible
 ```
 
 The unit tests need no VM. `WARDIAN_LIMA_SANDBOX=wardian uv run pytest tests/test_lima_git.py` runs the git tests against a fresh, running sandbox made by `create`, and destroys it at the end. A sandbox that already holds a project can fail them.

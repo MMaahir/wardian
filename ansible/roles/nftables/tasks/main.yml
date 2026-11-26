@@ -53,14 +53,14 @@
     group: root
     mode: "0644"
   loop: [ssh.socket, ssh.service]
-  register: ssh_ordering
+  register: nftables_ssh_ordering
 
 # The kernel tracks connections only while a loaded rule uses conntrack, and
 # on a fresh guest none does. When the drop policy loads, the kernel picks up
 # Ansible's open SSH connection mid-stream as new and drops sshd's replies,
 # and the play hangs. This table tracks every packet and accepts it, so the
 # connection is already established when the drop policy loads.
-- name: Track connections before the ruleset loads
+- name: Track connections before the ruleset loads  # noqa: no-handler - it must run at this point in the play, not at the end
   ansible.builtin.command:
     argv: [nft, -f, -]
     stdin: |
@@ -78,12 +78,12 @@
     name: nftables.service
     enabled: true
     state: started
-    daemon_reload: "{{ nftables_dropin is changed or ssh_ordering is changed }}"
+    daemon_reload: "{{ nftables_dropin is changed or nftables_ssh_ordering is changed }}"
 
 - name: Load the ruleset now
   ansible.builtin.meta: flush_handlers
 
-- name: Remove the handover table
+- name: Remove the handover table  # noqa: no-handler - it must run at this point in the play, not at the end
   ansible.builtin.command:
     argv: [nft, delete, table, inet, wardian_handover]
   when: nftables_ruleset is changed
